@@ -30,14 +30,14 @@ import org.apache.cloudstack.api.BaseAsyncCmd;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
+import org.apache.cloudstack.api.response.DomainResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.network.tungsten.api.response.TungstenFabricApplicationPolicySetResponse;
 import org.apache.cloudstack.network.tungsten.service.TungstenService;
 
 import javax.inject.Inject;
 
-@APICommand(name = CreateTungstenFabricApplicationPolicySetCmd.APINAME, description = "create Tungsten-Fabric application policy set",
-    responseObject = TungstenFabricApplicationPolicySetResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
+@APICommand(name = CreateTungstenFabricApplicationPolicySetCmd.APINAME, description = "create Tungsten-Fabric application policy set", responseObject = TungstenFabricApplicationPolicySetResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
 public class CreateTungstenFabricApplicationPolicySetCmd extends BaseAsyncCmd {
     public static final String APINAME = "createTungstenFabricApplicationPolicySet";
 
@@ -50,15 +50,18 @@ public class CreateTungstenFabricApplicationPolicySetCmd extends BaseAsyncCmd {
     @Parameter(name = ApiConstants.NAME, type = CommandType.STRING, required = true, description = "Tungsten-Fabric application policy set name")
     private String name;
 
+    @Parameter(name = ApiConstants.DOMAIN_ID, type = CommandType.UUID, entityType = DomainResponse.class, description = "the ID of the domain")
+    private Long domainId;
+
     @Override
     public void execute() throws ResourceUnavailableException, InsufficientCapacityException, ServerApiException,
-        ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
-        TungstenFabricApplicationPolicySetResponse tungstenFabricApplicationPolicySetResponse =
-            tungstenService.createTungstenApplicationPolicySet(
-            zoneId, name);
+            ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
+        TungstenFabricApplicationPolicySetResponse tungstenFabricApplicationPolicySetResponse = tungstenService
+                .createTungstenApplicationPolicySet(
+                        zoneId, domainId, name);
         if (tungstenFabricApplicationPolicySetResponse == null) {
             throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR,
-                "Failed to create Tungsten-Fabric application policy set");
+                    "Failed to create Tungsten-Fabric application policy set");
         } else {
             tungstenFabricApplicationPolicySetResponse.setResponseName(getCommandName());
             setResponseObject(tungstenFabricApplicationPolicySetResponse);

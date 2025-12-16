@@ -68,6 +68,18 @@ export default {
                 {
                   name: 'name',
                   required: true
+                },
+                {
+                  name: 'domainid',
+                  label: 'label.domain',
+                  type: 'uuid',
+                  api: 'listDomains',
+                  loading: false,
+                  opts: []
+                },
+                {
+                  name: 'account',
+                  label: 'label.account'
                 }
               ]
             },
@@ -116,6 +128,18 @@ export default {
                 {
                   name: 'name',
                   required: true
+                },
+                {
+                  name: 'domainid',
+                  label: 'label.domain',
+                  type: 'uuid',
+                  api: 'listDomains',
+                  loading: false,
+                  opts: []
+                },
+                {
+                  name: 'account',
+                  label: 'label.account'
                 }
               ]
             },
@@ -242,6 +266,18 @@ export default {
                   name: 'tagvalue',
                   label: 'label.tag.value',
                   required: true
+                },
+                {
+                  name: 'domainid',
+                  label: 'label.domain',
+                  type: 'uuid',
+                  api: 'listDomains',
+                  loading: false,
+                  opts: []
+                },
+                {
+                  name: 'account',
+                  label: 'label.account'
                 }
               ]
             },
@@ -392,6 +428,18 @@ export default {
                   name: 'endport',
                   required: true,
                   value: '-1'
+                },
+                {
+                  name: 'domainid',
+                  label: 'label.domain',
+                  type: 'uuid',
+                  api: 'listDomains',
+                  loading: false,
+                  opts: []
+                },
+                {
+                  name: 'account',
+                  label: 'label.account'
                 }
               ]
             },
@@ -457,6 +505,18 @@ export default {
                 {
                   name: 'ipprefixlen',
                   required: true
+                },
+                {
+                  name: 'domainid',
+                  label: 'label.domain',
+                  type: 'uuid',
+                  api: 'listDomains',
+                  loading: false,
+                  opts: []
+                },
+                {
+                  name: 'account',
+                  label: 'label.account'
                 }
               ]
             },

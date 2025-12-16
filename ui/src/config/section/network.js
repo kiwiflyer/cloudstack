@@ -1290,7 +1290,7 @@ export default {
       name: 'tungstenfabric',
       title: 'label.tungsten.fabric',
       icon: shallowRef(tungsten),
-      permission: ['listTungstenFabricProviders'],
+      permission: ['listTungstenFabricProviders', 'listTungstenFabricPolicy'],
       columns: [
         {
           field: 'name',

@@ -30,15 +30,14 @@ import org.apache.cloudstack.api.BaseAsyncCmd;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
+import org.apache.cloudstack.api.response.DomainResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.network.tungsten.api.response.TungstenFabricAddressGroupResponse;
 import org.apache.cloudstack.network.tungsten.service.TungstenService;
 
 import javax.inject.Inject;
 
-@APICommand(name = CreateTungstenFabricAddressGroupCmd.APINAME, description = "create Tungsten-Fabric address group",
-    responseObject = TungstenFabricAddressGroupResponse.class, requestHasSensitiveInfo = false,
-    responseHasSensitiveInfo = false)
+@APICommand(name = CreateTungstenFabricAddressGroupCmd.APINAME, description = "create Tungsten-Fabric address group", responseObject = TungstenFabricAddressGroupResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
 public class CreateTungstenFabricAddressGroupCmd extends BaseAsyncCmd {
     public static final String APINAME = "createTungstenFabricAddressGroup";
 
@@ -57,12 +56,15 @@ public class CreateTungstenFabricAddressGroupCmd extends BaseAsyncCmd {
     @Parameter(name = ApiConstants.IP_PREFIX_LEN, type = CommandType.INTEGER, required = true, description = "Tungsten-Fabric ip prefix length")
     private Integer ipPrefixLen;
 
+    @Parameter(name = ApiConstants.DOMAIN_ID, type = CommandType.UUID, entityType = DomainResponse.class, description = "the ID of the domain")
+    private Long domainId;
+
     @Override
     public void execute() throws ResourceUnavailableException, InsufficientCapacityException, ServerApiException,
-        ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
-        TungstenFabricAddressGroupResponse tungstenFabricAddressGroupResponse =
-            tungstenService.createTungstenAddressGroup(
-            zoneId, name, ipPrefix, ipPrefixLen);
+            ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
+        TungstenFabricAddressGroupResponse tungstenFabricAddressGroupResponse = tungstenService
+                .createTungstenAddressGroup(
+                        zoneId, domainId, name, ipPrefix, ipPrefixLen);
         if (tungstenFabricAddressGroupResponse == null) {
             throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to create Tungsten-Fabric address group");
         } else {

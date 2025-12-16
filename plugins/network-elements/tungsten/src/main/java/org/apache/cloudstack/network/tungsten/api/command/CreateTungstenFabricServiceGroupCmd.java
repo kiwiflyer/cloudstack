@@ -30,14 +30,14 @@ import org.apache.cloudstack.api.BaseAsyncCmd;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
+import org.apache.cloudstack.api.response.DomainResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.network.tungsten.api.response.TungstenFabricServiceGroupResponse;
 import org.apache.cloudstack.network.tungsten.service.TungstenService;
 
 import javax.inject.Inject;
 
-@APICommand(name = CreateTungstenFabricServiceGroupCmd.APINAME, description = "create Tungsten-Fabric service group",
-    responseObject = TungstenFabricServiceGroupResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
+@APICommand(name = CreateTungstenFabricServiceGroupCmd.APINAME, description = "create Tungsten-Fabric service group", responseObject = TungstenFabricServiceGroupResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
 public class CreateTungstenFabricServiceGroupCmd extends BaseAsyncCmd {
 
     public static final String APINAME = "createTungstenFabricServiceGroup";
@@ -60,12 +60,15 @@ public class CreateTungstenFabricServiceGroupCmd extends BaseAsyncCmd {
     @Parameter(name = ApiConstants.END_PORT, type = CommandType.INTEGER, required = true, description = "Tungsten-Fabric service group end port")
     private Integer endPort;
 
+    @Parameter(name = ApiConstants.DOMAIN_ID, type = CommandType.UUID, entityType = DomainResponse.class, description = "the ID of the domain")
+    private Long domainId;
+
     @Override
     public void execute() throws ResourceUnavailableException, InsufficientCapacityException, ServerApiException,
-        ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
-        TungstenFabricServiceGroupResponse tungstenFabricServiceGroupResponse =
-            tungstenService.createTungstenServiceGroup(
-            zoneId, name, protocol, startPort, endPort);
+            ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
+        TungstenFabricServiceGroupResponse tungstenFabricServiceGroupResponse = tungstenService
+                .createTungstenServiceGroup(
+                        zoneId, domainId, name, protocol, startPort, endPort);
         if (tungstenFabricServiceGroupResponse == null) {
             throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to create Tungsten-Fabric service group");
         } else {

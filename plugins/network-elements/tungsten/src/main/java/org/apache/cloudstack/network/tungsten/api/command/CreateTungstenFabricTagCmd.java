@@ -30,14 +30,14 @@ import org.apache.cloudstack.api.BaseAsyncCmd;
 import org.apache.cloudstack.api.BaseCmd;
 import org.apache.cloudstack.api.Parameter;
 import org.apache.cloudstack.api.ServerApiException;
+import org.apache.cloudstack.api.response.DomainResponse;
 import org.apache.cloudstack.api.response.ZoneResponse;
 import org.apache.cloudstack.network.tungsten.api.response.TungstenFabricTagResponse;
 import org.apache.cloudstack.network.tungsten.service.TungstenService;
 
 import javax.inject.Inject;
 
-@APICommand(name = CreateTungstenFabricTagCmd.APINAME, description = "create Tungsten-Fabric tag",
-    responseObject = TungstenFabricTagResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
+@APICommand(name = CreateTungstenFabricTagCmd.APINAME, description = "create Tungsten-Fabric tag", responseObject = TungstenFabricTagResponse.class, requestHasSensitiveInfo = false, responseHasSensitiveInfo = false)
 public class CreateTungstenFabricTagCmd extends BaseAsyncCmd {
     public static final String APINAME = "createTungstenFabricTag";
 
@@ -53,10 +53,14 @@ public class CreateTungstenFabricTagCmd extends BaseAsyncCmd {
     @Parameter(name = ApiConstants.TAG_VALUE, type = CommandType.STRING, required = true, description = "Tungsten-Fabric tag value")
     private String tagValue;
 
+    @Parameter(name = ApiConstants.DOMAIN_ID, type = CommandType.UUID, entityType = DomainResponse.class, description = "the ID of the domain")
+    private Long domainId;
+
     @Override
     public void execute() throws ResourceUnavailableException, InsufficientCapacityException, ServerApiException,
-        ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
-        TungstenFabricTagResponse tungstenFabricTagResponse = tungstenService.createTungstenTag(zoneId, tagType, tagValue);
+            ConcurrentOperationException, ResourceAllocationException, NetworkRuleConflictException {
+        TungstenFabricTagResponse tungstenFabricTagResponse = tungstenService.createTungstenTag(zoneId, domainId,
+                tagType, tagValue);
         if (tungstenFabricTagResponse == null) {
             throw new ServerApiException(ApiErrorCode.INTERNAL_ERROR, "Failed to create Tungsten-Fabric tag");
         } else {

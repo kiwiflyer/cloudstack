@@ -68,35 +68,41 @@ public interface TungstenService {
     boolean synchronizeTungstenData(Long tungstenProviderId);
 
     boolean addTungstenDefaultNetworkPolicy(long zoneId, String projectFqn, String policyName, String networkUuid,
-        List<TungstenRule> ruleList, int majorSequence, int minorSequence);
+            List<TungstenRule> ruleList, int majorSequence, int minorSequence);
 
-    TungstenFabricPolicyResponse createTungstenPolicy(long zoneId, String name);
+    TungstenFabricPolicyResponse createTungstenPolicy(long zoneId, Long domainId, String name);
 
-    TungstenFabricTagResponse createTungstenTag(long zoneId, String tagType, String tagValue);
+    TungstenFabricTagResponse createTungstenTag(long zoneId, Long domainId, String tagType, String tagValue);
 
     TungstenFabricTagTypeResponse createTungstenTagType(long zoneId, String name);
 
-    TungstenFabricAddressGroupResponse createTungstenAddressGroup(long zoneId, String name, String ipPrefix,
-        int ipPrefixLen);
+    TungstenFabricAddressGroupResponse createTungstenAddressGroup(long zoneId, Long domainId, String name,
+            String ipPrefix,
+            int ipPrefixLen);
 
-    TungstenFabricServiceGroupResponse createTungstenServiceGroup(long zoneId, String name, String protocol,
-        int startPort, int endPort);
+    TungstenFabricServiceGroupResponse createTungstenServiceGroup(long zoneId, Long domainId, String name,
+            String protocol,
+            int startPort, int endPort);
 
-    TungstenFabricFirewallRuleResponse createTungstenFirewallRule(long zoneId, final String firewallPolicyUuid, String name, String serviceGroupUuid,
-        String action, String srcTagUuid, String srcAddressGroupUuid, String srcNetworkUuid, String direction, String destTagUuid,
-        String destAddressGroupUuid, String destNetworkUuid, String tagTypeUuid, int sequence);
+    TungstenFabricFirewallRuleResponse createTungstenFirewallRule(long zoneId, final String firewallPolicyUuid,
+            String name, String serviceGroupUuid,
+            String action, String srcTagUuid, String srcAddressGroupUuid, String srcNetworkUuid, String direction,
+            String destTagUuid,
+            String destAddressGroupUuid, String destNetworkUuid, String tagTypeUuid, int sequence);
 
-    TungstenFabricFirewallPolicyResponse createTungstenFirewallPolicy(long zoneId, String applicationPolicySetUuid, String name, int sequence);
+    TungstenFabricFirewallPolicyResponse createTungstenFirewallPolicy(long zoneId, Long domainId,
+            String applicationPolicySetUuid, String name, int sequence);
 
-    TungstenFabricApplicationPolicySetResponse createTungstenApplicationPolicySet(long zoneId, String name);
+    TungstenFabricApplicationPolicySetResponse createTungstenApplicationPolicySet(long zoneId, Long domainId,
+            String name);
 
     TungstenFabricRuleResponse addTungstenPolicyRule(final long zoneId, final String policyUuid, final String action,
-        final String direction, final String protocol, final String srcNetwork, final String srcIpPrefix,
-        final int srcIpPrefixLen, final int srcStartPort, final int srcEndPort, final String destNetwork,
-        final String destIpPrefix, final int destIpPrefixLen, final int destStartPort, final int destEndPort);
+            final String direction, final String protocol, final String srcNetwork, final String srcIpPrefix,
+            final int srcIpPrefixLen, final int srcStartPort, final int srcEndPort, final String destNetwork,
+            final String destIpPrefix, final int destIpPrefixLen, final int destStartPort, final int destEndPort);
 
     List<BaseResponse> listTungstenPolicy(long zoneId, final Long networkId, final Long addressId,
-        final String policyUuid);
+            final String policyUuid);
 
     List<BaseResponse> listTungstenNetwork(long zoneId, final String networkUuid, final boolean listAll);
 
@@ -107,17 +113,17 @@ public interface TungstenService {
     List<BaseResponse> listTungstenPolicyRule(final long zoneId, final String policyUuid, final String ruleUuid);
 
     List<BaseResponse> listTungstenTags(final long zoneId, final String networkUuid, final String vmUuid,
-        final String nicUuid, final String policyUuid, final String applicationPolicySetUuid, final String tagUuid);
+            final String nicUuid, final String policyUuid, final String applicationPolicySetUuid, final String tagUuid);
 
     List<BaseResponse> listTungstenTagTypes(final long zoneId, final String tagTypeUuid);
 
     List<BaseResponse> listTungstenApplicationPolicySet(final long zoneId, final String applicationPolicySetUuid);
 
     List<BaseResponse> listTungstenFirewallPolicy(final long zoneId, final String applicationPolicySetUuid,
-        final String firewallPolicyUuid);
+            final String firewallPolicyUuid);
 
     List<BaseResponse> listTungstenFirewallRule(final long zoneId, final String firewallPolicyUuid,
-        final String firewallRuleUuid);
+            final String firewallRuleUuid);
 
     List<BaseResponse> listTungstenServiceGroup(final long zoneId, final String serviceGroupUuid);
 
@@ -126,7 +132,7 @@ public interface TungstenService {
     boolean deleteTungstenPolicy(final long zoneId, final String policyUuid);
 
     TungstenFabricPolicyResponse removeTungstenPolicyRule(final long zoneId, final String policyUuid,
-        final String ruleUuid);
+            final String ruleUuid);
 
     boolean deleteTungstenTag(final long zoneId, final String tagUuid);
 
@@ -143,16 +149,18 @@ public interface TungstenService {
     boolean deleteTungstenAddressGroup(final long zoneId, final String addressGroupUuid);
 
     TungstenFabricPolicyResponse applyTungstenPolicy(final long zoneId, final String networkUuid,
-        final String policyUuid, final int majorSequence, final int minorSequence);
+            final String policyUuid, final int majorSequence, final int minorSequence);
 
     TungstenFabricTagResponse applyTungstenTag(final long zoneId, final List<String> networkUuids,
-        final List<String> vmUuids, final List<String> nicUuids, final String policyUuid, final String applicationPolicySetUuid, final String tagUuid);
+            final List<String> vmUuids, final List<String> nicUuids, final String policyUuid,
+            final String applicationPolicySetUuid, final String tagUuid);
 
     TungstenFabricPolicyResponse removeTungstenPolicy(final long zoneId, final String networkUuid,
-        final String policyUuid);
+            final String policyUuid);
 
     TungstenFabricTagResponse removeTungstenTag(final long zoneId, final List<String> networkUuids,
-        final List<String> vmUuids, final List<String> nicUuids, final String policyUuid, final String applicationPolicySetUuid, final String tagUuid);
+            final List<String> vmUuids, final List<String> nicUuids, final String policyUuid,
+            final String applicationPolicySetUuid, final String tagUuid);
 
     void subscribeTungstenEvent();
 
@@ -169,18 +177,21 @@ public interface TungstenService {
     BaseResponse createRoutingLogicalRouter(final long zoneId, final String projectFqn, final String name);
 
     BaseResponse addNetworkGatewayToLogicalRouter(final long zoneId, final String networkUuid,
-        final String logicalRouterUuid);
+            final String logicalRouterUuid);
 
-    List<BaseResponse> listRoutingLogicalRouter(final long zoneId, final String networkUuid, final String logicalRouterUuid);
+    List<BaseResponse> listRoutingLogicalRouter(final long zoneId, final String networkUuid,
+            final String logicalRouterUuid);
 
     BaseResponse removeNetworkGatewayFromLogicalRouter(final long zoneId, final String networkUuid,
-        final String logicalRouterUuid);
+            final String logicalRouterUuid);
 
     boolean deleteLogicalRouter(final long zoneId, final String logicalRouterUuid);
 
     List<String> listConnectedNetworkFromLogicalRouter(final long zoneId, final String logicalRouterUuid);
 
-    TungstenFabricLBHealthMonitorVO updateTungstenFabricLBHealthMonitor(final long lbId, final String type, final int retry, final int timeout, final int interval, final String httpMethod, final String expectedCode, final String urlPath);
+    TungstenFabricLBHealthMonitorVO updateTungstenFabricLBHealthMonitor(final long lbId, final String type,
+            final int retry, final int timeout, final int interval, final String httpMethod, final String expectedCode,
+            final String urlPath);
 
     boolean applyLBHealthMonitor(final long lbId);
 
