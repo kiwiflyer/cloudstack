@@ -440,6 +440,37 @@ public class VpcManagerImpl extends ManagerBase implements VpcManager, VpcProvis
                 }
 
                 // configure default vpc offering with NSX as network service provider in NAT mode
+                // configure the default VPC offering backed by OpenSDN
+                // (apache/cloudstack#7208)
+                if (_vpcOffDao.findByUniqueName(VpcOffering.DEFAULT_VPC_OPENSDN_OFFERING_NAME) == null) {
+                    logger.debug("Creating default VPC offering with OpenSDN as network service provider {}",
+                            VpcOffering.DEFAULT_VPC_OPENSDN_OFFERING_NAME);
+                    final Map<Service, Set<Provider>> svcProviderMap = new HashMap<Service, Set<Provider>>();
+                    final Set<Provider> openSdnProviders = Set.of(Provider.Tungsten);
+                    for (final Service svc : getSupportedServices()) {
+                        if (Service.Vpn.equals(svc)) {
+                            // OpenSDN has no native site-to-site VPN, and the
+                            // element does not implement Site2SiteVpnServiceProvider.
+                            // Omitted rather than pointed at a provider that
+                            // cannot deliver it.
+                            continue;
+                        }
+                        if (Service.UserData.equals(svc)) {
+                            // The plugin delegates user data; TungstenElement
+                            // explicitly removes UserData from its services.
+                            svcProviderMap.put(svc, Set.of(Provider.ConfigDrive));
+                        } else {
+                            svcProviderMap.put(svc, openSdnProviders);
+                        }
+                    }
+                    // NATTED: the VPC's source NAT comes from its logical
+                    // router's service instance.
+                    createVpcOffering(VpcOffering.DEFAULT_VPC_OPENSDN_OFFERING_NAME,
+                            VpcOffering.DEFAULT_VPC_OPENSDN_OFFERING_NAME, svcProviderMap, false,
+                            State.Enabled, null, false, false, false, NetworkOffering.NetworkMode.NATTED, null,
+                            false, false);
+                }
+
                 if (_vpcOffDao.findByUniqueName(VpcOffering.DEFAULT_VPC_NAT_NSX_OFFERING_NAME) == null) {
                     logger.debug("Creating default VPC offering with NSX as network service provider" + VpcOffering.DEFAULT_VPC_NAT_NSX_OFFERING_NAME);
                     final Map<Service, Set<Provider>> svcProviderMap = new HashMap<Service, Set<Provider>>();
