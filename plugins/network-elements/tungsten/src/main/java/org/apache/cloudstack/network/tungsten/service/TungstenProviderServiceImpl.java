@@ -102,6 +102,8 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
     @Inject
     TungstenProviderDao tungstenProviderDao;
     @Inject
+    OpenSdnVersionDetector versionDetector;
+    @Inject
     DataCenterDao zoneDao;
     @Inject
     ResourceManager resourceMgr;
@@ -222,9 +224,17 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
             tungstenResource.configure(cmd.getHostname(), hostdetails);
             final Host host = resourceMgr.addHost(zoneId, tungstenResource, Host.Type.L2Networking, params);
             if (host != null) {
+                // Operator declaration wins, then a probe, then unknown. Unknown
+                // resolves to the baseline capability set, so a controller that
+                // cannot be identified never gets capabilities it may not support.
+                final OpenSdnVersionDetector.VersionResult version =
+                    versionDetector.resolve(cmd.getOpenSdnVersion(), hostname, port);
+
                 tungstenProvider = Transaction.execute((TransactionCallback<TungstenProviderVO>) status -> {
                     TungstenProviderVO tungstenProviderVO = new TungstenProviderVO(zoneId, name, host.getId(), port,
                         hostname, gateway, vrouterPort, introspectPort);
+                    tungstenProviderVO.setOpenSdnVersion(version.getVersion());
+                    tungstenProviderVO.setVersionDetected(version.isDetected());
                     tungstenProviderDao.persist(tungstenProviderVO);
 
                     DetailVO detail = new DetailVO(host.getId(), "tungstendeviceid",
@@ -272,6 +282,8 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
         tungstenProviderResponse.setUuid(tungstenProvider.getUuid());
         tungstenProviderResponse.setGateway(tungstenProvider.getGateway());
         tungstenProviderResponse.setIntrospectPort(tungstenProvider.getIntrospectPort());
+        tungstenProviderResponse.setOpenSdnVersion(tungstenProvider.getOpenSdnVersion());
+        tungstenProviderResponse.setVersionDetected(tungstenProvider.isVersionDetected());
         tungstenProviderResponse.setVrouterPort(tungstenProvider.getVrouterPort());
         tungstenProviderResponse.setZoneId(tungstenProvider.getZoneId());
         tungstenProviderResponse.setZoneName(zoneName);

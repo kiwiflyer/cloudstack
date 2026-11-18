@@ -62,6 +62,18 @@ public class TungstenProviderVO implements TungstenProvider {
     @Column(name = "introspect_port")
     private String introspectPort;
 
+    /**
+     * OpenSDN controller version, or null when unknown. Null resolves to the
+     * baseline capability set, so a provider registered before this column
+     * existed keeps behaving exactly as it did.
+     */
+    @Column(name = "opensdn_version")
+    private String openSdnVersion;
+
+    /** True when probed from the controller, false when operator-declared. */
+    @Column(name = "version_detected")
+    private boolean versionDetected;
+
     public TungstenProviderVO() {
         this.uuid = UUID.randomUUID().toString();
     }
@@ -138,6 +150,22 @@ public class TungstenProviderVO implements TungstenProvider {
 
     public void setGateway(final String gateway) {
         this.gateway = gateway;
+    }
+
+    public String getOpenSdnVersion() {
+        return openSdnVersion;
+    }
+
+    public void setOpenSdnVersion(String openSdnVersion) {
+        this.openSdnVersion = openSdnVersion;
+    }
+
+    public boolean isVersionDetected() {
+        return versionDetected;
+    }
+
+    public void setVersionDetected(boolean versionDetected) {
+        this.versionDetected = versionDetected;
     }
 
     @Override

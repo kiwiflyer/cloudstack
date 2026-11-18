@@ -271,3 +271,17 @@ CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.disk_offering', 'error_policy', 'VAR
 
 -- Rename persisted FlashArray provider name (plugin getName() changed from 'Flash Array' to 'FlashArray')
 UPDATE `cloud`.`storage_pool` SET `storage_provider_name` = 'FlashArray' WHERE `storage_provider_name` = 'Flash Array';
+
+--
+-- OpenSDN controller version tracking on the Tungsten-Fabric/OpenSDN provider
+-- (apache/cloudstack#7208 groundwork).
+--
+-- ADDITIVE ONLY. Existing rows get a NULL version, which resolves to the
+-- baseline capability set, so current deployments behave exactly as they do
+-- today.
+--
+CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.tungsten_providers', 'opensdn_version',
+    'varchar(40) DEFAULT NULL COMMENT "OpenSDN controller version, NULL if unknown"');
+
+CALL `cloud`.`IDEMPOTENT_ADD_COLUMN`('cloud.tungsten_providers', 'version_detected',
+    'int(1) unsigned NOT NULL DEFAULT 0 COMMENT "1 if probed from the controller, 0 if operator-declared"');

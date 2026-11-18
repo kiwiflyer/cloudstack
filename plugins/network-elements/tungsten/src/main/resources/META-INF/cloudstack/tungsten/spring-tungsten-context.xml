@@ -32,6 +32,12 @@
         <property name="name" value="TungstenGuestNetworkGuru" />
     </bean>
 
+    <!-- Version detection. Swap this bean for a probing implementation once
+         an OpenSDN controller's response has been verified; see
+         DeclaredOnlyVersionDetector for why there is no probe yet. -->
+    <bean id="openSdnVersionDetector"
+          class="org.apache.cloudstack.network.tungsten.service.DeclaredOnlyVersionDetector"/>
+
     <bean id="tungstenFabricUtils" class="org.apache.cloudstack.network.tungsten.service.TungstenFabricUtils"/>
 
     <bean id="tungstenElement" class="org.apache.cloudstack.network.tungsten.service.TungstenElement">

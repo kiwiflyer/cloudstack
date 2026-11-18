@@ -18,6 +18,7 @@ package org.apache.cloudstack.network.tungsten.service;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -87,6 +88,9 @@ public class TungstenProviderServiceTest {
         tungstenProviderService.tungstenProviderDao = tungstenProviderDao;
         tungstenProviderService.hostDetailsDao = hostDetailsDao;
         tungstenProviderService.messageBus = messageBus;
+        // The real detector, not a mock: these tests should exercise the actual
+        // resolution chain (declaration wins, then probe, then unknown).
+        tungstenProviderService.versionDetector = new DeclaredOnlyVersionDetector();
 
         when(dcDao.findById(anyLong())).thenReturn(zone);
         when(zone.getName()).thenReturn("ZoneName");
@@ -201,5 +205,31 @@ public class TungstenProviderServiceTest {
 
         assertNotNull(created);
         Mockito.verify(resourceMgr, Mockito.times(1)).addHost(anyLong(), any(), any(), anyMap());
+    }
+
+    @Test
+    public void testDeclaredVersionIsPersistedAndMarkedNotDetected() {
+        CreateTungstenFabricProviderCmd cmd = providerCmd(1L, "192.168.0.100", "8082");
+        when(cmd.getOpenSdnVersion()).thenReturn("24.1");
+
+        TungstenProvider created = tungstenProviderService.addProvider(cmd);
+
+        assertNotNull(created);
+        assertEquals("24.1", ((TungstenProviderVO) created).getOpenSdnVersion());
+        assertEquals(false, ((TungstenProviderVO) created).isVersionDetected());
+    }
+
+    @Test
+    public void testAbsentVersionLeavesTheProviderAtBaseline() {
+        // With the declared-only detector there is nothing to probe, so the
+        // version stays unknown and capability gating falls back to baseline.
+        CreateTungstenFabricProviderCmd cmd = providerCmd(1L, "192.168.0.100", "8082");
+        when(cmd.getOpenSdnVersion()).thenReturn(null);
+
+        TungstenProvider created = tungstenProviderService.addProvider(cmd);
+
+        assertNotNull(created);
+        assertNull(((TungstenProviderVO) created).getOpenSdnVersion());
+        assertEquals(false, ((TungstenProviderVO) created).isVersionDetected());
     }
 }

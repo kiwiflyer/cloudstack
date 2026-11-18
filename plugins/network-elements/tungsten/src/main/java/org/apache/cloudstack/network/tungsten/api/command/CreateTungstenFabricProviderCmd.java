@@ -65,6 +65,9 @@ public class CreateTungstenFabricProviderCmd extends BaseCmd {
     @Parameter(name = ApiConstants.TUNGSTEN_PROVIDER_INTROSPECT_PORT, type = CommandType.STRING, description = "Tungsten-Fabric provider introspect port")
     private String introspectPort;
 
+    @Parameter(name = ApiConstants.OPENSDN_VERSION, type = CommandType.STRING, description = "OpenSDN controller version, for example 24.1. Newer capabilities are gated on it; when omitted the controller is treated as baseline.")
+    private String openSdnVersion;
+
     public String getName() {
         return name;
     }
@@ -83,6 +86,10 @@ public class CreateTungstenFabricProviderCmd extends BaseCmd {
 
     public void setGateway(final String gateway) {
         this.gateway = gateway;
+    }
+
+    public String getOpenSdnVersion() {
+        return openSdnVersion;
     }
 
     public String getIntrospectPort() {
