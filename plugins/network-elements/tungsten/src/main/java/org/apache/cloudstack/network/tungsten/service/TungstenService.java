@@ -43,6 +43,12 @@ public interface TungstenService {
 
     String getTungstenProjectFqn(Network network);
 
+    /**
+     * The project FQN for an owner, for callers that are not a Network -- a VPC,
+     * for instance (apache/cloudstack#7208).
+     */
+    String getTungstenProjectFqn(long accountId, long domainId);
+
     List<TungstenProviderVO> getTungstenProviders();
 
     boolean createPublicNetwork(long zoneId);

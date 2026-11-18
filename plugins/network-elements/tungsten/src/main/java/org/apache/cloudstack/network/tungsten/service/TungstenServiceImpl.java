@@ -571,8 +571,13 @@ public class TungstenServiceImpl extends ManagerBase implements TungstenService 
             return TungstenApi.TUNGSTEN_DEFAULT_DOMAIN + ":" + TungstenApi.TUNGSTEN_DEFAULT_PROJECT;
         }
 
-        String networkProjectUuid = getProject(network.getAccountId());
-        return buildProjectFqnName(network.getDomainId(), networkProjectUuid);
+        return getTungstenProjectFqn(network.getAccountId(), network.getDomainId());
+    }
+
+    @Override
+    public String getTungstenProjectFqn(long accountId, long domainId) {
+        String networkProjectUuid = getProject(accountId);
+        return buildProjectFqnName(domainId, networkProjectUuid);
     }
 
     public String buildProjectFqnName(long domainUuid, String projectUuid) {

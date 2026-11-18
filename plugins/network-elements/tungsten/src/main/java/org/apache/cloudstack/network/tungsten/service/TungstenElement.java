@@ -68,6 +68,14 @@ import com.cloud.network.dao.PhysicalNetworkTrafficTypeDao;
 import com.cloud.network.dao.PhysicalNetworkTrafficTypeVO;
 import com.cloud.network.dao.TungstenGuestNetworkIpAddressDao;
 import com.cloud.network.dao.TungstenProviderDao;
+import com.cloud.network.element.VpcProvider;
+import com.cloud.network.element.NetworkACLServiceProvider;
+import com.cloud.network.vpc.Vpc;
+import com.cloud.network.vpc.PrivateGateway;
+import com.cloud.network.vpc.NetworkACLItem;
+import com.cloud.network.vpc.StaticRouteProfile;
+import org.apache.cloudstack.api.BaseResponse;
+import com.cloud.network.IpAddress;
 import com.cloud.network.element.DnsServiceProvider;
 import com.cloud.network.element.FirewallServiceProvider;
 import com.cloud.network.element.IpDeployer;
@@ -152,7 +160,8 @@ import javax.naming.ConfigurationException;
 public class TungstenElement extends AdapterBase
     implements StaticNatServiceProvider, IpDeployer, FirewallServiceProvider,
     LoadBalancingServiceProvider, PortForwardingServiceProvider, ResourceStateAdapter, DnsServiceProvider, Listener,
-    StateListener<VirtualMachine.State, VirtualMachine.Event, VirtualMachine>, NetworkMigrationResponder {
+    StateListener<VirtualMachine.State, VirtualMachine.Event, VirtualMachine>, NetworkMigrationResponder,
+    VpcProvider, NetworkACLServiceProvider {
 
     private static final String NETWORK = "network";
 
@@ -266,6 +275,10 @@ public class TungstenElement extends AdapterBase
         lbCapabilities.put(Network.Capability.HealthCheckPolicy, "true");
         capabilities.put(Network.Service.Lb, lbCapabilities);
         capabilities.put(Network.Service.PortForwarding, null);
+        // VPC (apache/cloudstack#7208). NetworkACL replaces Firewall inside a
+        // VPC; Gateway is required for the VPC's logical router.
+        capabilities.put(Network.Service.NetworkACL, null);
+        capabilities.put(Network.Service.Gateway, null);
 
         return capabilities;
     }
@@ -1180,5 +1193,148 @@ public class TungstenElement extends AdapterBase
         if (nic.getName() == null) {
             nic.setName(TungstenUtils.DEFAULT_VHOST_INTERFACE);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // VPC support (apache/cloudstack#7208)
+    //
+    // Built on the assumptions in section 7a of
+    // docs/superpowers/specs/2026-11-18-opensdn-vpc-support-proposal.md.
+    // None has been verified against a live OpenSDN controller. A1 is the one
+    // that matters most: that a project-scoped logical router isolates its
+    // tiers from other VPCs', so two VPCs may carry overlapping tier CIDRs.
+    // If A1 is wrong, this leaks traffic between VPCs.
+    // ------------------------------------------------------------------
+
+    /**
+     * A VPC is a logical router; its tiers are virtual networks attached to it.
+     *
+     * The plugin already creates a logical router per isolated network. This is
+     * the same primitive, scoped to the VPC instead, so all of a VPC's tiers
+     * share one router and route to each other through it.
+     */
+    @Override
+    public boolean implementVpc(Vpc vpc, DeployDestination dest, ReservationContext context) {
+        String projectFqn = tungstenService.getTungstenProjectFqn(vpc.getAccountId(), vpc.getDomainId());
+        BaseResponse response = tungstenService.createRoutingLogicalRouter(vpc.getZoneId(), projectFqn,
+            TungstenUtils.getVpcLogicalRouterName(vpc.getId()));
+        if (response == null) {
+            throw new CloudRuntimeException(
+                String.format("can not create the Tungsten-Fabric logical router for VPC %s", vpc.getName()));
+        }
+        return true;
+    }
+
+    @Override
+    public boolean shutdownVpc(Vpc vpc, ReservationContext context) {
+        String routerName = TungstenUtils.getVpcLogicalRouterName(vpc.getId());
+        List<BaseResponse> routers = tungstenService.listRoutingLogicalRouter(vpc.getZoneId(), null, null);
+        if (routers == null) {
+            return true;
+        }
+        // Teardown is cleanup: a router that is already gone is not a failure,
+        // and failing here would leave the VPC unable to be removed at all.
+        // Same reasoning as the deallocate() path for apache/cloudstack#7771.
+        try {
+            tungstenService.deleteLogicalRouter(vpc.getZoneId(), routerName);
+        } catch (RuntimeException e) {
+            logger.warn("Could not remove the Tungsten-Fabric logical router for VPC {} during shutdown; "
+                + "continuing. Reason: {}", vpc.getName(), e.getMessage());
+        }
+        return true;
+    }
+
+    /**
+     * Rewrites the tier's network policy from its ACL.
+     *
+     * The translation is in {@link TungstenAclTranslator}: ordering, direction,
+     * deny actions and the terminating deny all live there and are tested
+     * independently of the fabric.
+     */
+    @Override
+    public boolean applyNetworkACLs(Network network, List<? extends NetworkACLItem> rules)
+        throws ResourceUnavailableException {
+        if (network.getCidr() == null) {
+            throw new ResourceUnavailableException("a VPC tier must have a CIDR before its ACL can be applied",
+                Network.class, network.getId());
+        }
+
+        List<TungstenRule> tungstenRules = TungstenAclTranslator.translate(rules, network.getCidr());
+        String projectFqn = tungstenService.getTungstenProjectFqn(network);
+
+        // The policy is replaced wholesale rather than edited, so the rule
+        // order always matches the ACL's rule numbers.
+        return tungstenService.addTungstenDefaultNetworkPolicy(network.getDataCenterId(), projectFqn,
+            TungstenUtils.getVpcTierAclPolicyName(network.getId()), network.getUuid(), tungstenRules, 100, 0);
+    }
+
+    /**
+     * Reordering is a re-translate and rewrite, because the translator emits
+     * rules in ACL-number order and the policy is replaced whole.
+     */
+    @Override
+    public boolean reorderAclRules(Vpc vpc, List<? extends Network> networks, List<? extends NetworkACLItem> rules) {
+        for (Network network : networks) {
+            try {
+                applyNetworkACLs(network, rules);
+            } catch (ResourceUnavailableException e) {
+                logger.warn("Could not reorder ACL rules on tier {}: {}", network, e.getMessage());
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // --- Not implemented yet -------------------------------------------
+    // Each depends on an unverified assumption (7a) and would be guesswork
+    // rather than a design. They refuse rather than silently doing nothing,
+    // so a VPC offering that needs them fails visibly instead of producing a
+    // half-configured VPC.
+
+    @Override
+    public boolean createPrivateGateway(PrivateGateway gateway) throws ResourceUnavailableException {
+        // Assumption A3 (logical router interface onto a provider-created
+        // virtual network) is unverified; see section 7a.
+        throw new ResourceUnavailableException(
+            "VPC private gateways are not yet supported by the Tungsten-Fabric/OpenSDN plugin",
+            PrivateGateway.class, gateway == null ? 0L : gateway.getId());
+    }
+
+    @Override
+    public boolean deletePrivateGateway(PrivateGateway privateGateway) throws ResourceUnavailableException {
+        throw new ResourceUnavailableException(
+            "VPC private gateways are not yet supported by the Tungsten-Fabric/OpenSDN plugin",
+            PrivateGateway.class, privateGateway == null ? 0L : privateGateway.getId());
+    }
+
+    @Override
+    public boolean applyStaticRoutes(Vpc vpc, List<StaticRouteProfile> routes) throws ResourceUnavailableException {
+        if (routes == null || routes.isEmpty()) {
+            return true;
+        }
+        // Assumption A2 (static routes belong on the logical router rather than
+        // in a routing policy) is unverified; see section 7a.
+        throw new ResourceUnavailableException(
+            "VPC static routes are not yet supported by the Tungsten-Fabric/OpenSDN plugin",
+            Vpc.class, vpc == null ? 0L : vpc.getId());
+    }
+
+    @Override
+    public boolean applyACLItemsToPrivateGw(PrivateGateway gateway, List<? extends NetworkACLItem> rules)
+        throws ResourceUnavailableException {
+        throw new ResourceUnavailableException(
+            "VPC private gateways are not yet supported by the Tungsten-Fabric/OpenSDN plugin",
+            PrivateGateway.class, gateway == null ? 0L : gateway.getId());
+    }
+
+    @Override
+    public boolean updateVpcSourceNatIp(Vpc vpc, IpAddress address) {
+        // The VPC's source NAT address comes from its logical router's service
+        // instance, as it does for an isolated network. Reassigning it needs
+        // the same polling path as the network case (apache/cloudstack#7697)
+        // and has not been built.
+        logger.warn("Changing the source NAT IP of VPC {} is not supported by the Tungsten-Fabric/OpenSDN plugin",
+            vpc == null ? "unknown" : vpc.getName());
+        return false;
     }
 }
