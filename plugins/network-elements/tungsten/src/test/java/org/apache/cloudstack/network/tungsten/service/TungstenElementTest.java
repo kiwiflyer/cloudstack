@@ -19,11 +19,16 @@ package org.apache.cloudstack.network.tungsten.service;
 import org.apache.cloudstack.acl.ApiKeyPairVO;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.junit.Assert.fail;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -46,6 +51,8 @@ import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
 import com.cloud.hypervisor.Hypervisor;
 import com.cloud.network.IpAddressManager;
+import com.cloud.network.vpc.Vpc;
+import com.cloud.network.vpc.NetworkACLItem;
 import com.cloud.network.Network;
 import com.cloud.network.NetworkModel;
 import com.cloud.network.Networks;
@@ -126,6 +133,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 @RunWith(MockitoJUnitRunner.class)
 public class TungstenElementTest {
@@ -961,5 +969,95 @@ public class TungstenElementTest {
 
         tungstenElement.commitMigration(nic, network, vm, src, dest);
         verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(DeleteTungstenVRouterPortCommand.class), anyLong());
+    }
+
+    // --- VPC support (apache/cloudstack#7208) -----------------------------
+    // Built on the assumptions recorded in section 7a of the VPC proposal;
+    // none has been checked against a live fabric.
+
+    @Test
+    public void testVpcServicesAreAdvertised() {
+        Map<Network.Service, Map<Network.Capability, String>> capabilities = tungstenElement.getCapabilities();
+
+        assertTrue("NetworkACL is required for VPC tiers",
+            capabilities.containsKey(Network.Service.NetworkACL));
+        assertTrue("Gateway is required for VPC", capabilities.containsKey(Network.Service.Gateway));
+    }
+
+    @Test
+    public void testElementIsAVpcAndNetworkAclProvider() {
+        assertTrue("CloudStack only routes VPC work to a VpcProvider",
+            tungstenElement instanceof com.cloud.network.element.VpcProvider);
+        assertTrue("and ACL work to a NetworkACLServiceProvider",
+            tungstenElement instanceof com.cloud.network.element.NetworkACLServiceProvider);
+    }
+
+    @Test
+    public void testImplementVpcCreatesTheLogicalRouterForTheVpc() throws Exception {
+        Vpc vpc = mock(Vpc.class);
+        when(vpc.getId()).thenReturn(7L);
+        when(vpc.getZoneId()).thenReturn(1L);
+        when(tungstenService.createRoutingLogicalRouter(anyLong(), nullable(String.class), anyString()))
+            .thenReturn(mock(org.apache.cloudstack.api.BaseResponse.class));
+
+        boolean implemented = tungstenElement.implementVpc(vpc, mock(DeployDestination.class),
+            mock(ReservationContext.class));
+
+        assertTrue(implemented);
+        verify(tungstenService, times(1))
+            .createRoutingLogicalRouter(eq(1L), nullable(String.class),
+                eq(TungstenUtils.getVpcLogicalRouterName(7L)));
+    }
+
+    @Test
+    public void testShutdownVpcRemovesItsLogicalRouter() throws Exception {
+        Vpc vpc = mock(Vpc.class);
+        when(vpc.getId()).thenReturn(7L);
+        when(vpc.getZoneId()).thenReturn(1L);
+
+        boolean shutdown = tungstenElement.shutdownVpc(vpc, mock(ReservationContext.class));
+
+        assertTrue(shutdown);
+    }
+
+    @Test
+    public void testApplyNetworkAclsRewritesTheTierPolicy() throws Exception {
+        Network tier = mock(Network.class);
+        when(tier.getId()).thenReturn(11L);
+        when(tier.getUuid()).thenReturn("tier-uuid");
+        when(tier.getCidr()).thenReturn("10.1.1.0/24");
+        when(tier.getDataCenterId()).thenReturn(1L);
+        when(tungstenService.getTungstenProjectFqn(tier)).thenReturn("default-domain:default-project");
+
+        NetworkACLItem allow = mock(NetworkACLItem.class);
+        when(allow.getAction()).thenReturn(NetworkACLItem.Action.Allow);
+        when(allow.getTrafficType()).thenReturn(NetworkACLItem.TrafficType.Ingress);
+        when(allow.getProtocol()).thenReturn("tcp");
+        when(allow.getSourcePortStart()).thenReturn(80);
+        when(allow.getSourcePortEnd()).thenReturn(80);
+        when(allow.getSourceCidrList()).thenReturn(java.util.List.of("192.0.2.0/24"));
+        when(allow.getState()).thenReturn(NetworkACLItem.State.Active);
+
+        when(tungstenService.addTungstenDefaultNetworkPolicy(anyLong(), nullable(String.class), anyString(),
+            anyString(), anyList(), anyInt(), anyInt())).thenReturn(true);
+
+        boolean applied = tungstenElement.applyNetworkACLs(tier, java.util.List.of(allow));
+
+        assertTrue(applied);
+        verify(tungstenService, times(1)).addTungstenDefaultNetworkPolicy(eq(1L), nullable(String.class),
+            eq(TungstenUtils.getVpcTierAclPolicyName(11L)), eq("tier-uuid"), anyList(), anyInt(), anyInt());
+    }
+
+    @Test
+    public void testApplyNetworkAclsOnATierWithoutACidrIsRejected() {
+        Network tier = mock(Network.class);
+        when(tier.getCidr()).thenReturn(null);
+
+        try {
+            tungstenElement.applyNetworkACLs(tier, java.util.List.of());
+            fail("a tier with no CIDR has no local end for its ACL rules");
+        } catch (Exception expected) {
+            assertNotNull(expected);
+        }
     }
 }

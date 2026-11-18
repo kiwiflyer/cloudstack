@@ -119,6 +119,20 @@ public class TungstenUtils {
         return scoped("instanceIpSecondaryIp" + nicSecondaryIpId);
     }
 
+    /**
+     * The logical router that backs a VPC. Distinct from
+     * {@link #getLogicalRouterName(long)}, which is per isolated network --
+     * a VPC's router is shared by all of its tiers.
+     */
+    public static String getVpcLogicalRouterName(long vpcId) {
+        return scoped("vpcLogicalRouter" + vpcId);
+    }
+
+    /** The network policy carrying a VPC tier's network ACL. */
+    public static String getVpcTierAclPolicyName(long tierNetworkId) {
+        return scoped("vpc-tier-acl-policy" + tierNetworkId);
+    }
+
     public static String getLogicalRouterName(long networkId) {
         return scoped("logicalRouter" + networkId);
     }
