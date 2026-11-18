@@ -140,6 +140,54 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
             ListTungstenFabricLBHealthMonitorCmd.class);
     }
 
+    /**
+     * apache/cloudstack#7460: the plugin had no notion of a controller already
+     * being registered, so registering one twice produced providers CloudStack
+     * treated as unrelated.
+     *
+     * Two distinct cases:
+     *
+     * - Same zone. A genuine duplicate. {@code findByZoneId} uses
+     *   {@code findOneBy}, so a second row makes it return an arbitrary one of
+     *   them. Rejected.
+     *
+     * - Same controller, another zone. Legitimate: one controller can serve
+     *   several zones. Allowed, but the API port must agree, since one host
+     *   cannot serve its config API on two ports. A mismatch is an operator
+     *   typo, not a topology.
+     *
+     * Note on why each zone still gets its own host record: {@code HostVO}
+     * declares {@code data_center_id} NOT NULL, so a host belongs to exactly
+     * one zone, and {@code fk_tungsten_providers__host_id} is ON DELETE
+     * CASCADE. Sharing one host across zones would mean deleting the zone that
+     * owns it silently removes the other zone's provider row.
+     */
+    protected void validateProviderIsNotAlreadyRegistered(long zoneId, String hostname, String port) {
+        if (tungstenProviderDao.findByZoneId(zoneId) != null) {
+            throw new CloudRuntimeException(String.format(
+                "A Tungsten-Fabric provider is already registered in zone %s. Remove it before registering another.",
+                zoneId));
+        }
+
+        List<TungstenProviderVO> sameController = tungstenProviderDao.listByHostname(hostname);
+        if (sameController == null || sameController.isEmpty()) {
+            return;
+        }
+
+        for (TungstenProviderVO existing : sameController) {
+            if (!port.equals(existing.getPort())) {
+                throw new CloudRuntimeException(String.format(
+                    "Controller %s is already registered in zone %s on port %s, but was given port %s. "
+                        + "The same controller cannot serve its API on two ports.",
+                    hostname, existing.getZoneId(), existing.getPort(), port));
+            }
+        }
+
+        logger.info("Controller {} is already registered in {} other zone(s); zone {} will share it. "
+                + "Each zone keeps its own host record because hosts are zone-scoped.",
+            hostname, sameController.size(), zoneId);
+    }
+
     @Override
     public TungstenProvider addProvider(CreateTungstenFabricProviderCmd cmd) {
         TungstenProviderVO tungstenProvider;
@@ -154,6 +202,8 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
         final String introspectPort =
             cmd.getIntrospectPort() == null || cmd.getIntrospectPort().equals(StringUtils.EMPTY) ? "8085" :
                 cmd.getIntrospectPort();
+
+        validateProviderIsNotAlreadyRegistered(zoneId, hostname, port);
 
         TungstenResource tungstenResource = new TungstenResource();
 
