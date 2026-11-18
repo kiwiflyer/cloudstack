@@ -266,7 +266,7 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
                     // add default tungsten guest network policy
                     tungstenService.addTungstenDefaultNetworkPolicy(zoneId, tungstenProjectFqn,
                         TungstenUtils.getVirtualNetworkPolicyName(network.getId()), network.getUuid(),
-                        getDefautlGuestNetworkPolicyRule(network), 100, 0);
+                        getDefaultGuestNetworkPolicyRule(network), 100, 0);
 
                     IPAddressVO ipAddressVO = ipAddressDao.findByIpAndDcId(network.getDataCenterId(), natIp);
                     Pair<String, Integer> pair = NetUtils.getCidr(network.getCidr());
@@ -466,18 +466,37 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
         tungstenFabricUtils.sendTungstenCommand(setTungstenNetworkGatewayCommand, network.getDataCenterId());
     }
 
-    private List<TungstenRule> getDefautlGuestNetworkPolicyRule(Network network) {
+    List<TungstenRule> getDefaultGuestNetworkPolicyRule(Network network) {
         Pair<String, Integer> pair = NetUtils.getCidr(network.getCidr());
         List<TungstenRule> tungstenRuleList = new ArrayList<>();
+
+        // Traffic within the guest network is always permitted.
         tungstenRuleList.add(
             new TungstenRule(TungstenUtils.PASS_ACTION, TungstenUtils.TWO_WAY_DIRECTION, TungstenUtils.ANY,
                 TungstenUtils.ANY, pair.first(), pair.second(), -1, -1, TungstenUtils.ANY, pair.first(), pair.second(),
                 -1, -1));
+
+        // Egress to everything else follows the network offering's default
+        // egress policy, where isEgressDefaultPolicy() == true means allow.
+        // This used to be an unconditional deny, so a guest network created
+        // from an allow-egress offering silently denied all egress
+        // (apache/cloudstack#7967). An offering that cannot be resolved fails
+        // closed, matching the previous behaviour.
         tungstenRuleList.add(
-            new TungstenRule(TungstenUtils.DENY_ACTION, TungstenUtils.ONE_WAY_DIRECTION, TungstenUtils.ANY,
+            new TungstenRule(getDefaultEgressAction(network), TungstenUtils.ONE_WAY_DIRECTION, TungstenUtils.ANY,
                 TungstenUtils.ANY, pair.first(), pair.second(), -1, -1, TungstenUtils.ANY, TungstenUtils.ALL_IP4_PREFIX,
                 0, -1, -1));
         return tungstenRuleList;
+    }
+
+    private String getDefaultEgressAction(Network network) {
+        NetworkOffering networkOffering = networkOfferingDao.findById(network.getNetworkOfferingId());
+        if (networkOffering == null) {
+            logger.warn("Could not resolve network offering {} for network {}; defaulting egress to deny",
+                network.getNetworkOfferingId(), network);
+            return TungstenUtils.DENY_ACTION;
+        }
+        return networkOffering.isEgressDefaultPolicy() ? TungstenUtils.PASS_ACTION : TungstenUtils.DENY_ACTION;
     }
 
     private TungstenAnswer createTungstenLogicalRouter(Network network, String tungstenProjectFqn) {
