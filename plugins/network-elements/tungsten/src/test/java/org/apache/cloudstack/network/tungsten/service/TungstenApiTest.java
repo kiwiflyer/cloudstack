@@ -2099,4 +2099,75 @@ public class TungstenApiTest {
         assertNotNull(virtualNetwork);
         assertFalse(Boolean.TRUE.equals(virtualNetwork.getFabricSnat()));
     }
+
+    private java.util.Map<String, String> dhcpOptionsOf(VirtualMachineInterface vmi) {
+        java.util.Map<String, String> options = new java.util.HashMap<>();
+        if (vmi.getDhcpOptionList() != null && vmi.getDhcpOptionList().getDhcpOption() != null) {
+            for (net.juniper.tungsten.api.types.DhcpOptionType option : vmi.getDhcpOptionList().getDhcpOption()) {
+                options.put(option.getDhcpOptionName(), option.getDhcpOptionValue());
+            }
+        }
+        return options;
+    }
+
+    /** The network and VM must exist before a VMI can be attached to them. */
+    private void givenNetworkAndVirtualMachineExist() {
+        assertNotNull(tungstenApi.createTungstenNetwork(tungstenNetworkUuid, tungstenNetworkName,
+            tungstenNetworkName, projectUuid, true, false, "10.0.0.0", 24, "10.0.0.1", true, null,
+            "10.0.0.10", "10.0.0.20", false, true, ""));
+        assertNotNull(tungstenApi.createTungstenVirtualMachine(tungstenVmUuid, tungstenVmName));
+    }
+
+    @Test
+    public void testVmInterfaceCarriesTheHostnameAsDhcpOption12() {
+        // apache/cloudstack#7464: the VMI carried only DHCP option 3 (router),
+        // so guests fell back to their CloudStack internal name. Option 12 is
+        // Host Name.
+        givenNetworkAndVirtualMachineExist();
+
+        VirtualMachineInterface vmi = tungstenApi.createTungstenVmInterface(vmiUuid, vmiName,
+            "02:fc:f3:d6:83:c3", tungstenNetworkUuid, tungstenVmUuid, projectUuid, "10.0.0.1", true, "web-01");
+
+        assertNotNull(vmi);
+        java.util.Map<String, String> options = dhcpOptionsOf(vmi);
+        assertEquals("web-01", options.get("12"));
+        assertEquals("the router option must still be set", "10.0.0.1", options.get("3"));
+    }
+
+    @Test
+    public void testVmInterfaceOmitsHostnameOptionWhenHostnameIsBlank() {
+        givenNetworkAndVirtualMachineExist();
+
+        VirtualMachineInterface vmi = tungstenApi.createTungstenVmInterface(vmiUuid, vmiName,
+            "02:fc:f3:d6:83:c3", tungstenNetworkUuid, tungstenVmUuid, projectUuid, "10.0.0.1", true, "   ");
+
+        assertNotNull(vmi);
+        assertNull("a blank hostname must not be sent as an empty option", dhcpOptionsOf(vmi).get("12"));
+        assertEquals("10.0.0.1", dhcpOptionsOf(vmi).get("3"));
+    }
+
+    @Test
+    public void testNonDefaultNicGetsNoDhcpOptions() {
+        // Only the default NIC carries DHCP options; a hostname must not change that.
+        givenNetworkAndVirtualMachineExist();
+
+        VirtualMachineInterface vmi = tungstenApi.createTungstenVmInterface(vmiUuid, vmiName,
+            "02:fc:f3:d6:83:c3", tungstenNetworkUuid, tungstenVmUuid, projectUuid, "10.0.0.1", false, "web-01");
+
+        assertNotNull(vmi);
+        assertTrue(dhcpOptionsOf(vmi).isEmpty());
+    }
+
+    @Test
+    public void testLegacyVmInterfaceOverloadSetsNoHostname() {
+        // 19 existing call sites use the 8-arg form; it must keep its behaviour.
+        givenNetworkAndVirtualMachineExist();
+
+        VirtualMachineInterface vmi = tungstenApi.createTungstenVmInterface(vmiUuid, vmiName,
+            "02:fc:f3:d6:83:c3", tungstenNetworkUuid, tungstenVmUuid, projectUuid, "10.0.0.1", true);
+
+        assertNotNull(vmi);
+        assertNull(dhcpOptionsOf(vmi).get("12"));
+        assertEquals("10.0.0.1", dhcpOptionsOf(vmi).get("3"));
+    }
 }

@@ -100,6 +100,12 @@ import java.util.concurrent.TimeUnit;
 
 public class TungstenApi {
 
+    /** DHCP option 3: default router. */
+    private static final String DHCP_OPTION_ROUTER = "3";
+
+    /** DHCP option 12: host name (apache/cloudstack#7464). */
+    private static final String DHCP_OPTION_HOSTNAME = "12";
+
     protected Logger logger = LogManager.getLogger(getClass());
     private final Status.ErrorHandler errorHandler = logger::error;
 
@@ -232,6 +238,13 @@ public class TungstenApi {
 
     public VirtualMachineInterface createTungstenVmInterface(String nicUuid, String nicName, String mac,
         String virtualNetworkUuid, String virtualMachineUuid, String projectUuid, String gateway, boolean defaultNic) {
+        return createTungstenVmInterface(nicUuid, nicName, mac, virtualNetworkUuid, virtualMachineUuid, projectUuid,
+            gateway, defaultNic, null);
+    }
+
+    public VirtualMachineInterface createTungstenVmInterface(String nicUuid, String nicName, String mac,
+        String virtualNetworkUuid, String virtualMachineUuid, String projectUuid, String gateway, boolean defaultNic,
+        String hostname) {
         VirtualNetwork virtualNetwork = null;
         VirtualMachine virtualMachine = null;
         Project project = null;
@@ -257,7 +270,13 @@ public class TungstenApi {
             virtualMachineInterface.setMacAddresses(macAddressesType);
             if (defaultNic) {
                 DhcpOptionsListType dhcpOptionsListType = new DhcpOptionsListType();
-                dhcpOptionsListType.addDhcpOption(new DhcpOptionType("3", gateway));
+                // Option 3: router.
+                dhcpOptionsListType.addDhcpOption(new DhcpOptionType(DHCP_OPTION_ROUTER, gateway));
+                // Option 12: host name. apache/cloudstack#7464 - without it the
+                // guest falls back to its CloudStack internal name.
+                if (StringUtils.isNotBlank(hostname)) {
+                    dhcpOptionsListType.addDhcpOption(new DhcpOptionType(DHCP_OPTION_HOSTNAME, hostname.trim()));
+                }
                 virtualMachineInterface.setDhcpOptionList(dhcpOptionsListType);
             }
             Status status = apiConnector.create(virtualMachineInterface);

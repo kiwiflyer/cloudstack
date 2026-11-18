@@ -33,10 +33,18 @@ public class CreateTungstenVirtualMachineCommand extends TungstenCommand {
     private final String host;
     private final String gateway;
     private final boolean isDefaultNic;
+    private final String hostname;
 
     public CreateTungstenVirtualMachineCommand(final String projectFqn, final String vnUuid, final String vmUuid,
         final String vmName, final String nicUuid, final long nicId, final String ip, final String ipv6, final String mac,
         final String vmType, final String trafficType, final String host, final String gateway, final boolean isDefaultNic) {
+        this(projectFqn, vnUuid, vmUuid, vmName, nicUuid, nicId, ip, ipv6, mac, vmType, trafficType, host, gateway, isDefaultNic, null);
+    }
+
+    public CreateTungstenVirtualMachineCommand(final String projectFqn, final String vnUuid, final String vmUuid,
+        final String vmName, final String nicUuid, final long nicId, final String ip, final String ipv6, final String mac,
+        final String vmType, final String trafficType, final String host, final String gateway, final boolean isDefaultNic, final String hostname) {
+        this.hostname = hostname;
         this.projectFqn = projectFqn;
         this.vnUuid = vnUuid;
         this.vmUuid = vmUuid;
@@ -103,6 +111,11 @@ public class CreateTungstenVirtualMachineCommand extends TungstenCommand {
 
     public String getGateway() {
         return gateway;
+    }
+
+    /** Guest hostname for DHCP option 12 (apache/cloudstack#7464). */
+    public String getHostname() {
+        return hostname;
     }
 
     public boolean isDefaultNic() {

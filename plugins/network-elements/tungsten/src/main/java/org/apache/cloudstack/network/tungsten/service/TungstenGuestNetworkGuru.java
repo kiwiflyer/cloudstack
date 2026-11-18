@@ -122,6 +122,16 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
 
     private static final Networks.TrafficType[] TrafficTypes = {Networks.TrafficType.Guest};
 
+    /**
+     * How long to keep polling the logical router for its source NAT address
+     * before treating the network as unimplementable (apache/cloudstack#7697).
+     * Roughly 30 seconds in total.
+     */
+    static final int NAT_IP_MAX_ATTEMPTS = 10;
+
+    /** Settable so tests do not have to sleep. */
+    private long natIpRetryDelayMs = 3000L;
+
     public TungstenGuestNetworkGuru() {
         super();
         _isolationMethods = new PhysicalNetwork.IsolationMethod[] {new PhysicalNetwork.IsolationMethod("TF")};
@@ -252,44 +262,53 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
                 // create logical router with public network
                 TungstenAnswer createLogicalRouterAnswer = createTungstenLogicalRouter(network, tungstenProjectFqn);
 
-                // after logical router created, tungsten system will create service instance
-                // need to wait for service instance created before get its public ip address
-                // need to find a way to set public ip address to instance service
-                TungstenCommand getTungstenNatIpCommand = new GetTungstenNatIpCommand(tungstenProjectFqn,
-                    createLogicalRouterAnswer.getApiObjectBase().getUuid());
-                TungstenAnswer getTungstenNatIpAnswer = tungstenFabricUtils.sendTungstenCommand(getTungstenNatIpCommand,
-                    network.getDataCenterId());
-                if (getTungstenNatIpAnswer.getResult()) {
-                    String natIp = getTungstenNatIpAnswer.getDetails();
-                    Account networkAccount = accountDao.findById(network.getAccountId());
-                    ipAddressManager.assignSourceNatPublicIpAddress(zoneId, null, networkAccount,
-                        Vlan.VlanType.VirtualNetwork, network.getId(), natIp, false, false);
+                // After the logical router is created, the fabric creates its
+                // service instance asynchronously, so the source NAT address is
+                // not readable immediately. Poll for it.
+                TungstenAnswer getTungstenNatIpAnswer = getNatIpAddress(tungstenProjectFqn,
+                    createLogicalRouterAnswer.getApiObjectBase().getUuid(), network.getDataCenterId());
 
-                    // add default tungsten guest network policy
-                    tungstenService.addTungstenDefaultNetworkPolicy(zoneId, tungstenProjectFqn,
-                        TungstenUtils.getVirtualNetworkPolicyName(network.getId()), network.getUuid(),
-                        getDefaultGuestNetworkPolicyRule(network), 100, 0);
-
-                    IPAddressVO ipAddressVO = ipAddressDao.findByIpAndDcId(network.getDataCenterId(), natIp);
-                    Pair<String, Integer> pair = NetUtils.getCidr(network.getCidr());
-
-                    List<TungstenRule> tungstenSourceNatRuleList = new ArrayList<>();
-                    tungstenSourceNatRuleList.add(
-                        new TungstenRule(TungstenUtils.PASS_ACTION, TungstenUtils.ONE_WAY_DIRECTION, TungstenUtils.ANY,
-                            null, TungstenUtils.ALL_IP4_PREFIX, 0, -1, -1, null, natIp, TungstenUtils.MAX_CIDR, -1,
-                            -1));
-                    tungstenSourceNatRuleList.add(
-                        new TungstenRule(TungstenUtils.PASS_ACTION, TungstenUtils.TWO_WAY_DIRECTION, TungstenUtils.ANY,
-                            TungstenUtils.ANY, pair.first(), pair.second(), -1, -1, TungstenUtils.ANY,
-                            TungstenUtils.ALL_IP4_PREFIX, 0, -1, -1));
-
-                    tungstenService.addTungstenDefaultNetworkPolicy(zoneId, null,
-                        TungstenUtils.getPublicNetworkPolicyName(ipAddressVO.getId()), publicNetwork.getUuid(),
-                        tungstenSourceNatRuleList, 0, 0);
-
-                    // create gateway vmi, update logical router
-                    createTungstenVmiGateway(network, tungstenProjectFqn);
+                // apache/cloudstack#7697: this used to be a bare
+                // "if (answer.getResult())" with no else, so a failure left the
+                // virtual network and logical router created but with no source
+                // NAT IP, no guest policy, no public policy and no gateway VMI
+                // -- while implement() still reported success. Fail loudly
+                // instead, consistent with the DNS allocation above.
+                if (!getTungstenNatIpAnswer.getResult()) {
+                    throw new CloudRuntimeException(String.format(
+                        "can not get Tungsten-Fabric source NAT IP address for network %s after %s attempts",
+                        network, NAT_IP_MAX_ATTEMPTS));
                 }
+
+                String natIp = getTungstenNatIpAnswer.getDetails();
+                Account networkAccount = accountDao.findById(network.getAccountId());
+                ipAddressManager.assignSourceNatPublicIpAddress(zoneId, null, networkAccount,
+                    Vlan.VlanType.VirtualNetwork, network.getId(), natIp, false, false);
+
+                // add default tungsten guest network policy
+                tungstenService.addTungstenDefaultNetworkPolicy(zoneId, tungstenProjectFqn,
+                    TungstenUtils.getVirtualNetworkPolicyName(network.getId()), network.getUuid(),
+                    getDefaultGuestNetworkPolicyRule(network), 100, 0);
+
+                IPAddressVO ipAddressVO = ipAddressDao.findByIpAndDcId(network.getDataCenterId(), natIp);
+                Pair<String, Integer> pair = NetUtils.getCidr(network.getCidr());
+
+                List<TungstenRule> tungstenSourceNatRuleList = new ArrayList<>();
+                tungstenSourceNatRuleList.add(
+                    new TungstenRule(TungstenUtils.PASS_ACTION, TungstenUtils.ONE_WAY_DIRECTION, TungstenUtils.ANY,
+                        null, TungstenUtils.ALL_IP4_PREFIX, 0, -1, -1, null, natIp, TungstenUtils.MAX_CIDR, -1,
+                        -1));
+                tungstenSourceNatRuleList.add(
+                    new TungstenRule(TungstenUtils.PASS_ACTION, TungstenUtils.TWO_WAY_DIRECTION, TungstenUtils.ANY,
+                        TungstenUtils.ANY, pair.first(), pair.second(), -1, -1, TungstenUtils.ANY,
+                        TungstenUtils.ALL_IP4_PREFIX, 0, -1, -1));
+
+                tungstenService.addTungstenDefaultNetworkPolicy(zoneId, null,
+                    TungstenUtils.getPublicNetworkPolicyName(ipAddressVO.getId()), publicNetwork.getUuid(),
+                    tungstenSourceNatRuleList, 0, 0);
+
+                // create gateway vmi, update logical router
+                createTungstenVmiGateway(network, tungstenProjectFqn);
             }
         } catch (Exception ex) {
             throw new CloudRuntimeException(String.format("unable to create Tungsten-Fabric network %s", network));
@@ -456,6 +475,47 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
      * A missing provider is treated as "no gateway" deliberately: losing
      * connectivity silently is worse than enabling a gatewayless path.
      */
+    /**
+     * Reads the logical router's source NAT address, retrying while the fabric
+     * finishes creating the router's service instance.
+     *
+     * apache/cloudstack#7697: this was a single read with no retry, taken
+     * immediately after the logical router was created. The surrounding code
+     * already carried a comment acknowledging that it needs to wait for the
+     * service instance. The caller treats a failure here as fatal, so a slow
+     * fabric must not be mistaken for a missing address.
+     *
+     * @return the answer from the last attempt; the caller checks its result
+     */
+    TungstenAnswer getNatIpAddress(String tungstenProjectFqn, String logicalRouterUuid, long zoneId) {
+        TungstenAnswer answer = null;
+        for (int attempt = 1; attempt <= NAT_IP_MAX_ATTEMPTS; attempt++) {
+            TungstenCommand getTungstenNatIpCommand =
+                new GetTungstenNatIpCommand(tungstenProjectFqn, logicalRouterUuid);
+            answer = tungstenFabricUtils.sendTungstenCommand(getTungstenNatIpCommand, zoneId);
+            if (answer.getResult()) {
+                return answer;
+            }
+            if (attempt < NAT_IP_MAX_ATTEMPTS) {
+                logger.debug("Source NAT IP for logical router {} not available yet (attempt {} of {}); retrying",
+                    logicalRouterUuid, attempt, NAT_IP_MAX_ATTEMPTS);
+                pauseBeforeNextNatIpAttempt();
+            }
+        }
+        return answer;
+    }
+
+    private void pauseBeforeNextNatIpAttempt() {
+        if (natIpRetryDelayMs <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(natIpRetryDelayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     boolean shouldUseFabricSnat(TungstenProviderVO tungstenProvider) {
         return tungstenProvider == null || StringUtils.isBlank(tungstenProvider.getGateway());
     }

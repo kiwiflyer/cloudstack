@@ -633,7 +633,8 @@ public class TungstenResource implements ServerResource {
             VirtualMachineInterface.class, project.getQualifiedName(), vmiName);
         if (virtualMachineInterface == null) {
             virtualMachineInterface = tungstenApi.createTungstenVmInterface(cmd.getNicUuid(), vmiName, cmd.getMac(),
-                cmd.getVnUuid(), cmd.getVmUuid(), project.getUuid(), cmd.getGateway(), cmd.isDefaultNic());
+                cmd.getVnUuid(), cmd.getVmUuid(), project.getUuid(), cmd.getGateway(), cmd.isDefaultNic(),
+                cmd.getHostname());
         }
         if (virtualMachineInterface == null) {
             return new TungstenAnswer(cmd, new IOException());
