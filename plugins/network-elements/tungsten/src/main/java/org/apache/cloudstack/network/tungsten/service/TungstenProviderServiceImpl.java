@@ -30,9 +30,11 @@ import com.cloud.resource.ResourceManager;
 import com.cloud.utils.component.ManagerBase;
 import com.cloud.utils.db.Transaction;
 import com.cloud.utils.db.TransactionCallback;
+import com.cloud.utils.TungstenUtils;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.google.common.collect.Lists;
 import org.apache.cloudstack.api.BaseResponse;
+import org.apache.cloudstack.engine.orchestration.service.NetworkOrchestrationService;
 import org.apache.cloudstack.framework.messagebus.MessageBus;
 import org.apache.cloudstack.framework.messagebus.PublishScope;
 import org.apache.cloudstack.network.tungsten.api.command.AddTungstenFabricNetworkGatewayToLogicalRouterCmd;
@@ -186,6 +188,20 @@ public class TungstenProviderServiceImpl extends ManagerBase implements Tungsten
         logger.info("Controller {} is already registered in {} other zone(s); zone {} will share it. "
                 + "Each zone keeps its own host record because hosts are zone-scoped.",
             hostname, sameController.size(), zoneId);
+    }
+
+    @Override
+    public boolean start() {
+        // apache/cloudstack#7462: fabric object names are built from
+        // CloudStack-local ids, so two deployments sharing a controller
+        // collide. The prefix distinguishes them. Empty by default, which
+        // keeps the names every existing fabric already holds.
+        String prefix = NetworkOrchestrationService.OPENSDN_DEPLOYMENT_PREFIX.value();
+        TungstenUtils.setDeploymentPrefix(prefix);
+        if (StringUtils.isNotBlank(prefix)) {
+            logger.info("OpenSDN fabric objects for this deployment are named with the prefix '{}'", prefix);
+        }
+        return super.start();
     }
 
     @Override
