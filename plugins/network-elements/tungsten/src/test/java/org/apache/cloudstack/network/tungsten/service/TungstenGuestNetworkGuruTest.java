@@ -60,9 +60,12 @@ import com.cloud.network.dao.TungstenProviderDao;
 import com.cloud.network.element.TungstenProviderVO;
 import com.cloud.network.rules.FirewallRuleVO;
 import com.cloud.offering.NetworkOffering;
+import com.cloud.offerings.NetworkOfferingVO;
+import com.cloud.offerings.dao.NetworkOfferingDao;
 import com.cloud.offerings.dao.NetworkOfferingServiceMapDao;
 import com.cloud.user.Account;
 import com.cloud.user.dao.AccountDao;
+import com.cloud.utils.TungstenUtils;
 import com.cloud.utils.exception.CloudRuntimeException;
 import com.cloud.vm.Nic;
 import com.cloud.vm.NicProfile;
@@ -74,6 +77,7 @@ import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.dao.NicDao;
 import com.cloud.vm.dao.VMInstanceDao;
 import net.juniper.tungsten.api.types.LogicalRouter;
+import org.apache.cloudstack.network.tungsten.model.TungstenRule;
 import org.apache.cloudstack.network.tungsten.agent.api.ClearTungstenNetworkGatewayCommand;
 import org.apache.cloudstack.network.tungsten.agent.api.CreateTungstenLogicalRouterCommand;
 import org.apache.cloudstack.network.tungsten.agent.api.CreateTungstenNetworkCommand;
@@ -108,6 +112,8 @@ public class TungstenGuestNetworkGuruTest {
 
     @Mock
     NetworkOfferingServiceMapDao ntwkOfferingSrvcDao;
+    @Mock
+    NetworkOfferingDao networkOfferingDao;
     @Mock
     DataCenterVO dc;
     @Mock
@@ -163,6 +169,7 @@ public class TungstenGuestNetworkGuruTest {
         ReflectionTestUtils.setField(guru, "_dcDao", dcDao);
         ReflectionTestUtils.setField(guru, "_networkModel", networkModel);
         ReflectionTestUtils.setField(guru, "_nicDao", nicDao);
+        ReflectionTestUtils.setField(guru, "networkOfferingDao", networkOfferingDao);
         guru.networkOfferingServiceMapDao = ntwkOfferingSrvcDao;
         guru.tungstenFabricUtils = tungstenFabricUtils;
         guru.tungstenService = tungstenService;
@@ -525,5 +532,73 @@ public class TungstenGuestNetworkGuruTest {
         guru.commitMigration(nic, network, vmProfile, context, context);
         verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(DeleteTungstenVRouterPortCommand.class),
             anyLong());
+    }
+
+    /**
+     * The generated default policy's egress rule is the one whose destination
+     * prefix is 0.0.0.0/0. The destination network is "any" on every rule, so
+     * the prefix is what identifies it.
+     */
+    private TungstenRule egressRuleOf(List<TungstenRule> rules) {
+        return rules.stream()
+            .filter(r -> TungstenUtils.ALL_IP4_PREFIX.equals(r.getDstIpPrefix()) && r.getDstIpPrefixLen() == 0)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("no egress rule to 0.0.0.0/0 was generated"));
+    }
+
+    private NetworkVO guestNetworkWithOffering(boolean egressDefaultAllow) {
+        NetworkVO network = new NetworkVO();
+        network.setCidr("10.1.1.0/24");
+        ReflectionTestUtils.setField(network, "networkOfferingId", 1L);
+
+        NetworkOfferingVO networkOffering = mock(NetworkOfferingVO.class);
+        when(networkOffering.isEgressDefaultPolicy()).thenReturn(egressDefaultAllow);
+        when(networkOfferingDao.findById(1L)).thenReturn(networkOffering);
+
+        return network;
+    }
+
+    @Test
+    public void testDefaultPolicyDeniesEgressWhenOfferingDefaultsToDeny() {
+        List<TungstenRule> rules = guru.getDefaultGuestNetworkPolicyRule(guestNetworkWithOffering(false));
+
+        assertEquals("a deny-egress offering must produce a deny rule",
+            TungstenUtils.DENY_ACTION, egressRuleOf(rules).getAction());
+    }
+
+    @Test
+    public void testDefaultPolicyAllowsEgressWhenOfferingDefaultsToAllow() {
+        List<TungstenRule> rules = guru.getDefaultGuestNetworkPolicyRule(guestNetworkWithOffering(true));
+
+        assertEquals("an allow-egress offering must not be silently denied (#7967)",
+            TungstenUtils.PASS_ACTION, egressRuleOf(rules).getAction());
+    }
+
+    @Test
+    public void testDefaultPolicyDeniesEgressWhenOfferingCannotBeFound() {
+        NetworkVO network = new NetworkVO();
+        network.setCidr("10.1.1.0/24");
+        ReflectionTestUtils.setField(network, "networkOfferingId", 99L);
+        when(networkOfferingDao.findById(99L)).thenReturn(null);
+
+        List<TungstenRule> rules = guru.getDefaultGuestNetworkPolicyRule(network);
+
+        assertEquals("an unresolvable offering must fail closed, not open",
+            TungstenUtils.DENY_ACTION, egressRuleOf(rules).getAction());
+    }
+
+    @Test
+    public void testDefaultPolicyAlwaysPermitsIntraNetworkTraffic() {
+        List<TungstenRule> denyEgress = guru.getDefaultGuestNetworkPolicyRule(guestNetworkWithOffering(false));
+        List<TungstenRule> allowEgress = guru.getDefaultGuestNetworkPolicyRule(guestNetworkWithOffering(true));
+
+        for (List<TungstenRule> rules : List.of(denyEgress, allowEgress)) {
+            TungstenRule intra = rules.stream()
+                .filter(r -> "10.1.1.0".equals(r.getDstIpPrefix()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("intra-network rule missing"));
+            assertEquals(TungstenUtils.PASS_ACTION, intra.getAction());
+            assertEquals(TungstenUtils.TWO_WAY_DIRECTION, intra.getDirection());
+        }
     }
 }
