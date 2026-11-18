@@ -23,6 +23,41 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class TungstenUtils {
+
+    /**
+     * Distinguishes the fabric objects of one CloudStack deployment from
+     * another's when several share a controller (apache/cloudstack#7462).
+     *
+     * Empty by default, which produces exactly the names the plugin has always
+     * produced. That default matters: an existing fabric holds objects under
+     * the unprefixed names, and changing them would orphan every one of them.
+     * Setting a prefix on an established deployment therefore needs the fabric
+     * objects renamed to match; it is intended for new deployments, or for a
+     * deliberate migration.
+     *
+     * Process-wide because the naming helpers are static. Set once at plugin
+     * startup from the opensdn.deployment.prefix setting.
+     */
+    private static volatile String deploymentPrefix = "";
+
+    public static void setDeploymentPrefix(final String prefix) {
+        deploymentPrefix = prefix == null ? "" : prefix.trim();
+    }
+
+    public static String getDeploymentPrefix() {
+        return deploymentPrefix;
+    }
+
+    /**
+     * Qualifies a fabric object name with the deployment prefix.
+     *
+     * Only for names this plugin invents from CloudStack-local identifiers.
+     * Names that must match what the fabric itself generates, and names of
+     * things that are not fabric objects at all, must not pass through here.
+     */
+    private static String scoped(final String name) {
+        return deploymentPrefix.isEmpty() ? name : deploymentPrefix + "-" + name;
+    }
     private static final String GUEST_TYPE = "Guest";
     private static final String SECURITY_GROUP = "securityGroup";
     public static final String INGRESS_RULE = "ingress";
@@ -61,51 +96,51 @@ public class TungstenUtils {
 
     public static String getVmiName(String trafficType, String vmType, String vmName, long nicId) {
         if (nicId != 0 && trafficType.equals(GUEST_TYPE))
-            return "vmi" + trafficType + vmType + nicId;
+            return scoped("vmi" + trafficType + vmType + nicId);
         else
-            return "vmi" + trafficType + vmType + vmName;
+            return scoped("vmi" + trafficType + vmType + vmName);
     }
 
     public static String getInstanceIpName(String trafficType, String vmType, String vmName, long nicId) {
         if (nicId != 0 && trafficType.equals(GUEST_TYPE))
-            return "instanceIp" + trafficType + vmType + nicId;
+            return scoped("instanceIp" + trafficType + vmType + nicId);
         else
-            return "instanceIp" + trafficType + vmType + vmName;
+            return scoped("instanceIp" + trafficType + vmType + vmName);
     }
 
     public static String getV6InstanceIpName(String trafficType, String vmType, String vmName, long nicId) {
         if (nicId != 0 && trafficType.equals(GUEST_TYPE))
-            return "instanceV6Ip" + trafficType + vmType + nicId;
+            return scoped("instanceV6Ip" + trafficType + vmType + nicId);
         else
-            return "instanceV6Ip" + trafficType + vmType + vmName;
+            return scoped("instanceV6Ip" + trafficType + vmType + vmName);
     }
 
     public static String getSecondaryInstanceIpName(long nicSecondaryIpId) {
-        return "instanceIpSecondaryIp" + nicSecondaryIpId;
+        return scoped("instanceIpSecondaryIp" + nicSecondaryIpId);
     }
 
     public static String getLogicalRouterName(long networkId) {
-        return "logicalRouter" + networkId;
+        return scoped("logicalRouter" + networkId);
     }
 
     public static String getNetworkGatewayVmiName(long vnId) {
-        return "internalGatewayVmi" + vnId;
+        return scoped("internalGatewayVmi" + vnId);
     }
 
     public static String getRoutingGatewayVmiName(String routerName, String networkName) {
-        return "routingGatewayVmi" + routerName + networkName;
+        return scoped("routingGatewayVmi" + routerName + networkName);
     }
 
     public static String getNetworkGatewayIiName(long pvnId) {
-        return "internalGatewayIi" + pvnId;
+        return scoped("internalGatewayIi" + pvnId);
     }
 
     public static String getRoutingGatewayIiName(String routerName, String networkName) {
-        return "routingGatewayIi" + routerName + networkName;
+        return scoped("routingGatewayIi" + routerName + networkName);
     }
 
     public static String getPublicNetworkName(long zoneId) {
-        return PUBLIC_NETWORK_NAME + zoneId;
+        return scoped(PUBLIC_NETWORK_NAME + zoneId);
     }
 
     public static String getGuestNetworkName(String networkName, String networkUuid) {
@@ -113,20 +148,20 @@ public class TungstenUtils {
     }
 
     public static String getSharedNetworkName(long networkId) {
-        return SHARED_NETWORK_NAME + networkId;
+        return scoped(SHARED_NETWORK_NAME + networkId);
     }
 
     public static String getManagementNetworkName(long mvnId) {
-        return MANAGEMENT_NETWORK_NAME + mvnId;
+        return scoped(MANAGEMENT_NETWORK_NAME + mvnId);
     }
 
 
     public static String getVgwName(long zoneId) {
-        return "vgw" + zoneId;
+        return scoped("vgw" + zoneId);
     }
 
     public static String getSgVgwName(long networkId) {
-        return "sgvgw" + networkId;
+        return scoped("sgvgw" + networkId);
     }
 
     public static String getVrfNetworkName(List<String> networkQualifiedName) {
@@ -136,11 +171,11 @@ public class TungstenUtils {
     }
 
     public static String getFloatingIpPoolName(long zoneId) {
-        return "floating-ip-pool" + zoneId;
+        return scoped("floating-ip-pool" + zoneId);
     }
 
     public static String getFloatingIpName(long nicId) {
-        return "floating-ip" + nicId;
+        return scoped("floating-ip" + nicId);
     }
 
     public static String getSnatNetworkStartName(List<String> projectFqn, String logicalRouterUuid) {
@@ -148,71 +183,71 @@ public class TungstenUtils {
     }
 
     public static String getPublicNetworkPolicyName(long publicIpAddressId) {
-        return "public-network-policy" + publicIpAddressId;
+        return scoped("public-network-policy" + publicIpAddressId);
     }
 
     public static String getManagementPolicyName(long zoneId) {
-        return "management-network-policy" + zoneId;
+        return scoped("management-network-policy" + zoneId);
     }
 
     public static String getFabricPolicyName(long zoneId) {
-        return "fabric-network-policy" + zoneId;
+        return scoped("fabric-network-policy" + zoneId);
     }
 
     public static String getVirtualNetworkPolicyName(long networkId) {
-        return "virtual-network-policy" + networkId;
+        return scoped("virtual-network-policy" + networkId);
     }
 
     public static String getDefaultPublicNetworkPolicyName(long zoneId) {
-        return "default-public-network-policy" + zoneId;
+        return scoped("default-public-network-policy" + zoneId);
     }
 
     public static String getDefaultPublicSubnetPolicyName(long subnetId) {
-        return "default-public-subnet-policy" + subnetId;
+        return scoped("default-public-subnet-policy" + subnetId);
     }
 
     public static String getRuleNetworkPolicyName(long ruleId) {
-        return "rule-network-policy" + ruleId;
+        return scoped("rule-network-policy" + ruleId);
     }
 
     public static String getSubnetName(long networkId) {
-        return "subnet-name" + networkId;
+        return scoped("subnet-name" + networkId);
     }
 
     public static String getIPV4SubnetName(long networkId) {
-        return "subnet-name-IPV4" + networkId;
+        return scoped("subnet-name-IPV4" + networkId);
     }
 
     public static String getIPV6SubnetName(long networkId) {
-        return "subnet-name-IPV6" + networkId;
+        return scoped("subnet-name-IPV6" + networkId);
     }
 
     public static String getLoadBalancerVmiName(long publicIpId) {
-        return "loadbalancer-vmi" + publicIpId;
+        return scoped("loadbalancer-vmi" + publicIpId);
     }
 
     public static String getLoadBalancerIiName(long publicIpId) {
-        return "loadbalancer-ii" + publicIpId;
+        return scoped("loadbalancer-ii" + publicIpId);
     }
 
     public static String getLoadBalancerName(long publicIpId) {
-        return "loadbalancer" + publicIpId;
+        return scoped("loadbalancer" + publicIpId);
     }
 
     public static String getLoadBalancerListenerName(long ruleId) {
-        return "loadbalancer-listener" + ruleId;
+        return scoped("loadbalancer-listener" + ruleId);
     }
 
     public static String getLoadBalancerHealthMonitorName(long publicIpId) {
-        return "loadbalancer-healthmonitor" + publicIpId;
+        return scoped("loadbalancer-healthmonitor" + publicIpId);
     }
 
     public static String getLoadBalancerPoolName(long ruleId) {
-        return "loadbalancer-pool" + ruleId;
+        return scoped("loadbalancer-pool" + ruleId);
     }
 
     public static String getLoadBalancerMemberName(long ruleId, String memberIp) {
-        return "loadbalancer-member" + ruleId + memberIp;
+        return scoped("loadbalancer-member" + ruleId + memberIp);
     }
 
     public static String getLoadBalancerAlgorithm(String algorithm) {
@@ -264,7 +299,7 @@ public class TungstenUtils {
     }
 
     public static String getSecurityGroupName(String name, long accountId) {
-        return SECURITY_GROUP + name + accountId;
+        return scoped(SECURITY_GROUP + name + accountId);
     }
 
     public static String getSingleIpAddressCidr(String ipAddress) {

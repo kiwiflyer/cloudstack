@@ -116,6 +116,11 @@ public interface NetworkOrchestrationService {
     ConfigKey<Boolean> TUNGSTEN_ENABLED = new ConfigKey<>(Boolean.class, "tungsten.plugin.enable", "Advanced", "false",
             "Indicates whether to enable the Tungsten plugin", false, ConfigKey.Scope.Zone, null);
 
+    ConfigKey<String> OPENSDN_DEPLOYMENT_PREFIX = new ConfigKey<>(String.class, "opensdn.deployment.prefix", "Advanced", "",
+            "Prefix applied to the fabric objects this deployment creates, so several CloudStack deployments can share one "
+            + "OpenSDN controller without colliding. Empty by default, which keeps the existing names. Setting it on an "
+            + "established deployment requires the existing fabric objects to be renamed to match.", false, ConfigKey.Scope.Global, null);
+
     ConfigKey<Boolean> NSX_ENABLED = new ConfigKey<>(Boolean.class, "nsx.plugin.enable", "Advanced", "false",
             "Indicates whether to enable the NSX plugin", false, ConfigKey.Scope.Zone, null);
 
