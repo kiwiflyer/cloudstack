@@ -39,6 +39,7 @@ import com.cloud.dc.dao.VlanDao;
 import com.cloud.deploy.DeployDestination;
 import com.cloud.deploy.DeploymentPlan;
 import com.cloud.exception.InsufficientAddressCapacityException;
+import com.cloud.exception.InvalidParameterValueException;
 import com.cloud.exception.InsufficientVirtualNetworkCapacityException;
 import com.cloud.host.HostVO;
 import com.cloud.host.dao.HostDao;
@@ -264,20 +265,68 @@ public class TungstenGuestNetworkGuruTest {
         verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(DeleteTungstenVmInterfaceCommand.class), anyLong());
     }
 
-    @Test(expected = CloudRuntimeException.class)
-    public void testDeallocateWithException() {
+    /**
+     * apache/cloudstack#7771: cleanup must attempt every step.
+     *
+     * This replaces a test that stubbed IllegalArgumentException and expected
+     * deallocate to propagate CloudRuntimeException. Production never throws
+     * IllegalArgumentException here - TungstenFabricUtils.sendTungstenCommand
+     * throws InvalidParameterValueException - so that test exercised a path the
+     * real code never takes, while the real failure aborted cleanup silently.
+     */
+    @Test
+    public void testDeallocateContinuesCleanupWhenTheInterfaceDeleteFails() {
         final Network network = mock(Network.class);
         final NicProfile nicProfile = mock(NicProfile.class);
         final VirtualMachineProfile virtualMachineProfile = mock(VirtualMachineProfile.class);
-        final NicVO nicVO = mock(NicVO.class);
 
-        when(tungstenFabricUtils.sendTungstenCommand(any(DeleteTungstenVmCommand.class), anyLong())).thenThrow(
-            new IllegalArgumentException());
-        when(nicDao.listByVmId(anyLong())).thenReturn(List.of(nicVO));
+        when(network.getDataCenterId()).thenReturn(1L);
         when(network.getTrafficType()).thenReturn(Networks.TrafficType.Guest);
         when(virtualMachineProfile.getType()).thenReturn(VirtualMachine.Type.User);
+        when(nicDao.listByVmId(anyLong())).thenReturn(List.of(mock(NicVO.class)));
+        // The VMI was never created, because the deploy failed before that.
+        when(tungstenFabricUtils.sendTungstenCommand(any(DeleteTungstenVmInterfaceCommand.class), anyLong()))
+            .thenThrow(new InvalidParameterValueException("Failed API call to Tungsten-Fabric Network plugin"));
 
         guru.deallocate(network, nicProfile, virtualMachineProfile);
+
+        // The fabric VM object must still be removed, or it and its addresses
+        // leak and block the next deployment with "IP address already in use".
+        verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(DeleteTungstenVmCommand.class), anyLong());
+    }
+
+    @Test
+    public void testDeallocateDoesNotThrowWhenEveryCleanupStepFails() {
+        final Network network = mock(Network.class);
+        final NicProfile nicProfile = mock(NicProfile.class);
+        final VirtualMachineProfile virtualMachineProfile = mock(VirtualMachineProfile.class);
+
+        when(network.getDataCenterId()).thenReturn(1L);
+        when(network.getTrafficType()).thenReturn(Networks.TrafficType.Guest);
+        when(virtualMachineProfile.getType()).thenReturn(VirtualMachine.Type.User);
+        when(nicDao.listByVmId(anyLong())).thenReturn(List.of(mock(NicVO.class)));
+        when(tungstenFabricUtils.sendTungstenCommand(any(TungstenCommand.class), anyLong()))
+            .thenThrow(new InvalidParameterValueException("Failed to find a Tungsten-Fabric provider"));
+
+        // A zone whose provider was never registered must still let its VMs be
+        // expunged; failing here leaves CloudStack unable to clean up at all.
+        guru.deallocate(network, nicProfile, virtualMachineProfile);
+    }
+
+    @Test
+    public void testDeallocateLeavesTheFabricVmAloneWhenOtherNicsRemain() {
+        final Network network = mock(Network.class);
+        final NicProfile nicProfile = mock(NicProfile.class);
+        final VirtualMachineProfile virtualMachineProfile = mock(VirtualMachineProfile.class);
+
+        when(network.getDataCenterId()).thenReturn(1L);
+        when(network.getTrafficType()).thenReturn(Networks.TrafficType.Guest);
+        when(virtualMachineProfile.getType()).thenReturn(VirtualMachine.Type.User);
+        when(nicDao.listByVmId(anyLong())).thenReturn(List.of(mock(NicVO.class), mock(NicVO.class)));
+
+        guru.deallocate(network, nicProfile, virtualMachineProfile);
+
+        verify(tungstenFabricUtils, times(0)).sendTungstenCommand(any(DeleteTungstenVmCommand.class), anyLong());
     }
 
     @Test
