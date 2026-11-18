@@ -24,6 +24,13 @@ import java.util.List;
 public interface TungstenProviderDao extends GenericDao<TungstenProviderVO, Long> {
     TungstenProviderVO findByZoneId(long zoneId);
 
+    /**
+     * Every provider pointing at the same controller hostname, across all
+     * zones. Used to recognise a controller that is already registered
+     * elsewhere (apache/cloudstack#7460).
+     */
+    List<TungstenProviderVO> listByHostname(String hostname);
+
     TungstenProviderVO findByUuid(String uuid);
 
     List<TungstenProviderVO> findAll();

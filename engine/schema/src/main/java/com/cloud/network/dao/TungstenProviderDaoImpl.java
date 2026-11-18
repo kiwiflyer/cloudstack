@@ -64,6 +64,13 @@ public class TungstenProviderDaoImpl extends GenericDaoBase<TungstenProviderVO, 
     }
 
     @Override
+    public List<TungstenProviderVO> listByHostname(String hostname) {
+        SearchCriteria<TungstenProviderVO> sc = allFieldsSearch.create();
+        sc.setParameters("hostname", hostname);
+        return listBy(sc);
+    }
+
+    @Override
     public TungstenProviderVO findByUuid(String uuid) {
         SearchCriteria<TungstenProviderVO> sc = allFieldsSearch.create();
         sc.setParameters("uuid", uuid);

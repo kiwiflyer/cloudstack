@@ -139,4 +139,67 @@ public class TungstenProviderServiceTest {
         List<BaseResponse> baseResponseList = tungstenProviderService.listTungstenProvider(null);
         assertEquals(2, baseResponseList.size());
     }
+
+    private CreateTungstenFabricProviderCmd providerCmd(long zoneId, String hostname, String port) {
+        CreateTungstenFabricProviderCmd cmd = Mockito.mock(CreateTungstenFabricProviderCmd.class);
+        when(cmd.getZoneId()).thenReturn(zoneId);
+        when(cmd.getName()).thenReturn("TungstenProviderName");
+        when(cmd.getHostname()).thenReturn(hostname);
+        when(cmd.getPort()).thenReturn(port);
+        return cmd;
+    }
+
+    @Test
+    public void testSecondProviderInTheSameZoneIsRejected() {
+        // apache/cloudstack#7460: nothing stopped a second provider being
+        // registered in a zone, after which findByZoneId returned an arbitrary
+        // one of them.
+        TungstenProviderVO existing = Mockito.mock(TungstenProviderVO.class);
+        when(tungstenProviderDao.findByZoneId(1L)).thenReturn(existing);
+
+        try {
+            tungstenProviderService.addProvider(providerCmd(1L, "192.168.0.100", "8082"));
+            fail("registering a second provider in the same zone must be rejected");
+        } catch (CloudRuntimeException expected) {
+            assertNotNull(expected.getMessage());
+        }
+
+        Mockito.verify(resourceMgr, Mockito.never()).addHost(anyLong(), any(), any(), anyMap());
+    }
+
+    @Test
+    public void testSameControllerInAnotherZoneWithConflictingPortIsRejected() {
+        // The same host cannot serve its config API on two different ports;
+        // this is an operator typo, not a valid topology.
+        TungstenProviderVO otherZone = Mockito.mock(TungstenProviderVO.class);
+        when(otherZone.getZoneId()).thenReturn(1L);
+        when(otherZone.getPort()).thenReturn("8082");
+        when(tungstenProviderDao.listByHostname("192.168.0.100"))
+            .thenReturn(Arrays.asList(otherZone));
+
+        try {
+            tungstenProviderService.addProvider(providerCmd(2L, "192.168.0.100", "9999"));
+            fail("the same controller registered with a different port must be rejected");
+        } catch (CloudRuntimeException expected) {
+            assertNotNull(expected.getMessage());
+        }
+    }
+
+    @Test
+    public void testSameControllerInAnotherZoneIsAllowedAndGetsItsOwnHost() {
+        // Hosts are zone-scoped (HostVO.data_center_id is NOT NULL) and
+        // tungsten_providers.host_id cascades on delete, so sharing one host
+        // record across zones would let deleting zone 1 silently remove zone
+        // 2's provider. Each zone keeps its own host.
+        TungstenProviderVO otherZone = Mockito.mock(TungstenProviderVO.class);
+        when(otherZone.getPort()).thenReturn("8082");
+        when(tungstenProviderDao.listByHostname("192.168.0.100"))
+            .thenReturn(Arrays.asList(otherZone));
+
+        TungstenProvider created = tungstenProviderService.addProvider(
+            providerCmd(2L, "192.168.0.100", "8082"));
+
+        assertNotNull(created);
+        Mockito.verify(resourceMgr, Mockito.times(1)).addHost(anyLong(), any(), any(), anyMap());
+    }
 }
