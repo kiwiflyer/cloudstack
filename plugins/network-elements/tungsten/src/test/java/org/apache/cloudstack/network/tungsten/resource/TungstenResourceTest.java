@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -315,8 +316,10 @@ public class TungstenResourceTest {
         when(virtualMachineInterface.getUuid()).thenReturn("b604c7f7-1dbc-42d8-bceb-2c0898034a7a");
         when(tungstenApi.getTungstenObject(eq(VirtualNetwork.class), anyString())).thenReturn(virtualNetwork);
         when(tungstenApi.createTungstenVirtualMachine(anyString(), anyString())).thenReturn(virtualMachine);
+        // TungstenResource now calls the overload carrying the DHCP hostname
+        // (apache/cloudstack#7464), so the stub must match that signature.
         when(tungstenApi.createTungstenVmInterface(anyString(), anyString(), anyString(), anyString(), anyString(),
-            anyString(), anyString(), anyBoolean())).thenReturn(virtualMachineInterface);
+            anyString(), anyString(), anyBoolean(), nullable(String.class))).thenReturn(virtualMachineInterface);
         when(tungstenApi.createTungstenInstanceIp(anyString(), anyString(), anyString(), anyString())).thenReturn(
             instanceIp);
         tungstenVRouterApiMocked.when(

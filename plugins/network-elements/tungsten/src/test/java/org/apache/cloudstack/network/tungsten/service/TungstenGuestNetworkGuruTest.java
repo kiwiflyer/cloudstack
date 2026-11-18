@@ -19,6 +19,7 @@ package org.apache.cloudstack.network.tungsten.service;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -634,5 +635,73 @@ public class TungstenGuestNetworkGuruTest {
     public void testFabricSnatRequestedWhenProviderIsMissing() {
         assertTrue("an absent provider must not silently lose connectivity",
             guru.shouldUseFabricSnat(null));
+    }
+
+    /** Mirrors testImplementGuestNetwork's setup, minus the NAT IP stubbing. */
+    private Network guestNetworkReadyToImplement() {
+        final Network network = mock(Network.class);
+        when(network.getTrafficType()).thenReturn(Networks.TrafficType.Guest);
+        when(network.getMode()).thenReturn(Networks.Mode.Dhcp);
+        when(network.getGateway()).thenReturn("192.168.1.1");
+        when(network.getCidr()).thenReturn("192.168.1.0/24");
+        when(network.getBroadcastDomainType()).thenReturn(Networks.BroadcastDomainType.TUNGSTEN);
+        when(network.getNetworkOfferingId()).thenReturn(1L);
+        when(network.getState()).thenReturn(Network.State.Implementing);
+        when(network.getDataCenterId()).thenReturn(2L);
+        when(network.getPhysicalNetworkId()).thenReturn(3L);
+        when(offering.isRedundantRouter()).thenReturn(false);
+        when(offering.getGuestType()).thenReturn(Network.GuestType.Isolated);
+        when(tungstenService.getTungstenProjectFqn(network)).thenReturn("default-domain:default-project");
+        when(networkModel.getSystemNetworkByZoneAndTrafficType(anyLong(), any())).thenReturn(new NetworkVO());
+        when(tungstenFabricUtils.sendTungstenCommand(any(CreateTungstenNetworkCommand.class), anyLong()))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), true, ""));
+        when(tungstenFabricUtils.sendTungstenCommand(any(CreateTungstenLogicalRouterCommand.class), anyLong()))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), new LogicalRouter(), true, ""));
+        when(tungstenService.allocateDnsIpAddress(any(Network.class), any(), anyString())).thenReturn(true);
+        return network;
+    }
+
+    @Test
+    public void testImplementFailsLoudlyWhenNatIpCannotBeObtained() {
+        // apache/cloudstack#7697: the source NAT lookup had no else branch, so
+        // a failure left the network created but with no source NAT IP, no
+        // guest policy, no public policy and no gateway VMI - and implement()
+        // still reported success. The network must not be reported implemented.
+        ReflectionTestUtils.setField(guru, "natIpRetryDelayMs", 0L);
+        final Network network = guestNetworkReadyToImplement();
+        when(tungstenFabricUtils.sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong()))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), false, "service instance not ready"));
+
+        try {
+            guru.implement(network, offering, mock(DeployDestination.class), mock(ReservationContext.class));
+            fail("implement must not report success when the source NAT IP cannot be obtained");
+        } catch (CloudRuntimeException expected) {
+            assertNotNull(expected.getMessage());
+        }
+
+        // And it must not have gone on to build the rest of the network.
+        verify(tungstenFabricUtils, times(0)).sendTungstenCommand(any(SetTungstenNetworkGatewayCommand.class),
+            anyLong());
+    }
+
+    @Test
+    public void testNatIpIsRetriedWhileTheServiceInstanceIsBeingCreated() {
+        // The fabric creates the service instance asynchronously after the
+        // logical router, so the first read can legitimately come back empty.
+        ReflectionTestUtils.setField(guru, "natIpRetryDelayMs", 0L);
+        final Network network = guestNetworkReadyToImplement();
+        when(tungstenFabricUtils.sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong()))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), false, ""))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), false, ""))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), true, "192.168.1.100"));
+        when(ipAddressDao.findByIpAndDcId(anyLong(), anyString())).thenReturn(mock(IPAddressVO.class));
+
+        final Network implemented =
+            guru.implement(network, offering, mock(DeployDestination.class), mock(ReservationContext.class));
+
+        assertEquals(Network.State.Implemented, implemented.getState());
+        verify(tungstenFabricUtils, times(3)).sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong());
+        verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(SetTungstenNetworkGatewayCommand.class),
+            anyLong());
     }
 }

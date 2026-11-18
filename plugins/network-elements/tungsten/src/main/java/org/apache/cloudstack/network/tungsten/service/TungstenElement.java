@@ -1161,7 +1161,11 @@ public class TungstenElement extends AdapterBase
         TungstenCommand createTungstenVirtualMachineCommand = new CreateTungstenVirtualMachineCommand(
             tungstenProjectFqn, network.getUuid(), vm.getUuid(), vm.getInstanceName(), nic.getUuid(), nic.getId(),
             nic.getIPv4Address(), null, nic.getMacAddress(), vm.getType().toString(),
-            network.getTrafficType().toString(), host.getPublicIpAddress(), network.getGateway(), nic.isDefaultNic());
+            network.getTrafficType().toString(), host.getPublicIpAddress(), network.getGateway(), nic.isDefaultNic(),
+            // apache/cloudstack#7464: the fabric's VM object is named after the
+            // CloudStack internal name, so DHCP served that as the hostname.
+            // Serve the VM's hostname instead.
+            vmInstanceVO.getHostName());
         return tungstenFabricUtils.sendTungstenCommand(createTungstenVirtualMachineCommand, network.getDataCenterId());
     }
 
