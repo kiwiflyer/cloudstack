@@ -511,7 +511,8 @@ public class TungstenResource implements ServerResource {
         VirtualNetwork virtualNetwork = tungstenApi.createTungstenNetwork(cmd.getUuid(), cmd.getName(),
             cmd.getDisplayName(), project.getUuid(), cmd.isRouterExternal(), cmd.isShared(), cmd.getIpPrefix(),
             cmd.getIpPrefixLen(), cmd.getGateway(), cmd.isDhcpEnable(), cmd.getDnsServer(), cmd.getAllocationStart(),
-            cmd.getAllocationEnd(), cmd.isIpFromStart(), cmd.isManagementNetwork(), cmd.getSubnetName());
+            cmd.getAllocationEnd(), cmd.isIpFromStart(), cmd.isManagementNetwork(), cmd.getSubnetName(),
+            cmd.isFabricSnat());
 
         if (virtualNetwork != null)
             return new TungstenAnswer(cmd, virtualNetwork, true, "Tungsten-Fabric network created");

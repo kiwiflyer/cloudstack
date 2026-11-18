@@ -159,6 +159,15 @@ public class TungstenApi {
         boolean routerExternal, boolean shared, String ipPrefix, int ipPrefixLen, String gateway, boolean dhcpEnable,
         String dnsServer, String allocationStart, String allocationEnd, boolean ipFromStart,
         boolean isManagementNetwork, String subnetName) {
+        return createTungstenNetwork(uuid, name, displayName, parent, routerExternal, shared, ipPrefix, ipPrefixLen,
+            gateway, dhcpEnable, dnsServer, allocationStart, allocationEnd, ipFromStart, isManagementNetwork,
+            subnetName, false);
+    }
+
+    public VirtualNetwork createTungstenNetwork(String uuid, String name, String displayName, String parent,
+        boolean routerExternal, boolean shared, String ipPrefix, int ipPrefixLen, String gateway, boolean dhcpEnable,
+        String dnsServer, String allocationStart, String allocationEnd, boolean ipFromStart,
+        boolean isManagementNetwork, String subnetName, boolean fabricSnat) {
         try {
             VirtualNetwork virtualNetwork = (VirtualNetwork) apiConnector.findById(VirtualNetwork.class, uuid);
             if (virtualNetwork != null)
@@ -183,6 +192,13 @@ public class TungstenApi {
             virtualNetwork.setParent(project);
             virtualNetwork.setRouterExternal(routerExternal);
             virtualNetwork.setIsShared(shared);
+
+            // apache/cloudstack#7463: with no gateway vRouter there is no route
+            // from guest networks to public networks. IP fabric SNAT gives the
+            // network a gatewayless path to the underlay.
+            if (fabricSnat) {
+                virtualNetwork.setFabricSnat(true);
+            }
 
             if (isManagementNetwork) {
                 VirtualNetwork fabricNetwork = (VirtualNetwork) apiConnector.findByFQN(VirtualNetwork.class,

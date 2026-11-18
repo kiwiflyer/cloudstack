@@ -2062,4 +2062,41 @@ public class TungstenApiTest {
         list2.sort(comparator);
         assertEquals(list1, list2);
     }
+
+    @Test
+    public void testCreateTungstenNetworkEnablesFabricSnatWhenRequested() {
+        // apache/cloudstack#7463: with no gateway vRouter there is no route
+        // from guest networks to the outside world. IP fabric SNAT is the
+        // gatewayless path.
+        VirtualNetwork virtualNetwork = tungstenApi.createTungstenNetwork(tungstenNetworkUuid,
+            tungstenNetworkName, tungstenNetworkName, projectUuid, true, false, "10.0.0.0", 24,
+            "10.0.0.1", true, null, "10.0.0.10", "10.0.0.20", false, false, "", true);
+
+        assertNotNull(virtualNetwork);
+        assertTrue("fabric SNAT must be enabled when requested",
+            Boolean.TRUE.equals(virtualNetwork.getFabricSnat()));
+    }
+
+    @Test
+    public void testCreateTungstenNetworkLeavesFabricSnatOffWhenNotRequested() {
+        VirtualNetwork virtualNetwork = tungstenApi.createTungstenNetwork(tungstenNetworkUuid,
+            tungstenNetworkName, tungstenNetworkName, projectUuid, true, false, "10.0.0.0", 24,
+            "10.0.0.1", true, null, "10.0.0.10", "10.0.0.20", false, false, "", false);
+
+        assertNotNull(virtualNetwork);
+        assertFalse("fabric SNAT must stay off unless asked for",
+            Boolean.TRUE.equals(virtualNetwork.getFabricSnat()));
+    }
+
+    @Test
+    public void testCreateTungstenNetworkLegacyOverloadLeavesFabricSnatOff() {
+        // The 16-arg overload is used by 40+ existing call sites and must keep
+        // its current behaviour.
+        VirtualNetwork virtualNetwork = tungstenApi.createTungstenNetwork(tungstenNetworkUuid,
+            tungstenNetworkName, tungstenNetworkName, projectUuid, true, false, "10.0.0.0", 24,
+            "10.0.0.1", true, null, "10.0.0.10", "10.0.0.20", false, false, "");
+
+        assertNotNull(virtualNetwork);
+        assertFalse(Boolean.TRUE.equals(virtualNetwork.getFabricSnat()));
+    }
 }

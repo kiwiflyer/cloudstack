@@ -35,12 +35,23 @@ public class CreateTungstenNetworkCommand extends TungstenCommand {
     private final boolean ipFromStart;
     private final boolean isManagementNetwork;
     private final String subnetName;
+    private final boolean fabricSnat;
 
     public CreateTungstenNetworkCommand(final String uuid, final String name, final String displayName,
         final String projectFqn, final boolean routerExternal, final boolean shared, final String ipPrefix,
         final int ipPrefixLen, final String gateway, final boolean dhcpEnable, final String dnsServer,
         final String allocationStart, final String allocationEnd, final boolean ipFromStart,
         final boolean isManagementNetwork, final String subnetName) {
+        this(uuid, name, displayName, projectFqn, routerExternal, shared, ipPrefix, ipPrefixLen, gateway, dhcpEnable,
+            dnsServer, allocationStart, allocationEnd, ipFromStart, isManagementNetwork, subnetName, false);
+    }
+
+    public CreateTungstenNetworkCommand(final String uuid, final String name, final String displayName,
+        final String projectFqn, final boolean routerExternal, final boolean shared, final String ipPrefix,
+        final int ipPrefixLen, final String gateway, final boolean dhcpEnable, final String dnsServer,
+        final String allocationStart, final String allocationEnd, final boolean ipFromStart,
+        final boolean isManagementNetwork, final String subnetName, final boolean fabricSnat) {
+        this.fabricSnat = fabricSnat;
         this.uuid = uuid;
         this.name = name;
         this.displayName = displayName;
@@ -123,17 +134,22 @@ public class CreateTungstenNetworkCommand extends TungstenCommand {
         return subnetName;
     }
 
+    /** apache/cloudstack#7463: enable IP fabric SNAT when there is no gateway vRouter. */
+    public boolean isFabricSnat() {
+        return fabricSnat;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         if (!super.equals(o)) return false;
         CreateTungstenNetworkCommand that = (CreateTungstenNetworkCommand) o;
-        return routerExternal == that.routerExternal && shared == that.shared && ipPrefixLen == that.ipPrefixLen && dhcpEnable == that.dhcpEnable && ipFromStart == that.ipFromStart && isManagementNetwork == that.isManagementNetwork && Objects.equals(uuid, that.uuid) && Objects.equals(name, that.name) && Objects.equals(displayName, that.displayName) && Objects.equals(projectFqn, that.projectFqn) && Objects.equals(ipPrefix, that.ipPrefix) && Objects.equals(gateway, that.gateway) && Objects.equals(dnsServer, that.dnsServer) && Objects.equals(allocationStart, that.allocationStart) && Objects.equals(allocationEnd, that.allocationEnd) && Objects.equals(subnetName, that.subnetName);
+        return routerExternal == that.routerExternal && shared == that.shared && ipPrefixLen == that.ipPrefixLen && dhcpEnable == that.dhcpEnable && ipFromStart == that.ipFromStart && isManagementNetwork == that.isManagementNetwork && Objects.equals(uuid, that.uuid) && Objects.equals(name, that.name) && Objects.equals(displayName, that.displayName) && Objects.equals(projectFqn, that.projectFqn) && Objects.equals(ipPrefix, that.ipPrefix) && Objects.equals(gateway, that.gateway) && Objects.equals(dnsServer, that.dnsServer) && Objects.equals(allocationStart, that.allocationStart) && Objects.equals(allocationEnd, that.allocationEnd) && fabricSnat == that.fabricSnat && Objects.equals(subnetName, that.subnetName);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(super.hashCode(), uuid, name, displayName, projectFqn, routerExternal, shared, ipPrefix, ipPrefixLen, gateway, dhcpEnable, dnsServer, allocationStart, allocationEnd, ipFromStart, isManagementNetwork, subnetName);
+        return Objects.hash(super.hashCode(), uuid, name, displayName, projectFqn, routerExternal, shared, ipPrefix, ipPrefixLen, gateway, dhcpEnable, dnsServer, allocationStart, allocationEnd, ipFromStart, isManagementNetwork, subnetName, fabricSnat);
     }
 }

@@ -326,10 +326,12 @@ export default {
           required: true
         },
         {
+          // apache/cloudstack#7461: optional. With no gateway vRouter, guest
+          // networks fall back to IP fabric SNAT (#7463).
           title: 'label.tungsten.provider.gateway',
           key: 'tungstenGateway',
           placeHolder: 'message.installwizard.tooltip.tungsten.provider.gateway',
-          required: true
+          required: false
         },
         {
           title: 'label.tungsten.provider.port',
