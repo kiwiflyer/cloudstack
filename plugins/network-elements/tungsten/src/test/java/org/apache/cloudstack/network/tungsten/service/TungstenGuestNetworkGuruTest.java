@@ -24,7 +24,10 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -55,6 +58,8 @@ import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkDetailVO;
 import com.cloud.network.dao.NetworkDetailsDao;
+import com.cloud.network.vpc.VpcVO;
+import com.cloud.network.vpc.dao.VpcDao;
 import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkDao;
 import com.cloud.network.dao.PhysicalNetworkVO;
@@ -117,6 +122,8 @@ public class TungstenGuestNetworkGuruTest {
     @Mock
     NetworkOfferingDao networkOfferingDao;
     @Mock
+    VpcDao vpcDao;
+    @Mock
     DataCenterVO dc;
     @Mock
     PhysicalNetworkDao physicalNetworkDao;
@@ -172,6 +179,7 @@ public class TungstenGuestNetworkGuruTest {
         ReflectionTestUtils.setField(guru, "_networkModel", networkModel);
         ReflectionTestUtils.setField(guru, "_nicDao", nicDao);
         ReflectionTestUtils.setField(guru, "networkOfferingDao", networkOfferingDao);
+        guru.vpcDao = vpcDao;
         guru.networkOfferingServiceMapDao = ntwkOfferingSrvcDao;
         guru.tungstenFabricUtils = tungstenFabricUtils;
         guru.tungstenService = tungstenService;
@@ -752,5 +760,65 @@ public class TungstenGuestNetworkGuruTest {
         verify(tungstenFabricUtils, times(3)).sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong());
         verify(tungstenFabricUtils, times(1)).sendTungstenCommand(any(SetTungstenNetworkGatewayCommand.class),
             anyLong());
+    }
+
+    // --- VPC tiers (apache/cloudstack#7208) -------------------------------
+
+    @Test
+    public void testVpcTierAttachesToTheVpcRouterInsteadOfCreatingItsOwn() throws Exception {
+        // The whole point of the re-scoping: a tier must join the VPC's router,
+        // not get a private one, or tiers cannot route to each other.
+        final Network tier = guestNetworkReadyToImplement();
+        when(tier.getVpcId()).thenReturn(7L);
+        VpcVO vpc = mock(VpcVO.class);
+        when(vpc.getUuid()).thenReturn("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        when(vpcDao.findById(7L)).thenReturn(vpc);
+        when(tungstenService.addNetworkGatewayToLogicalRouter(anyLong(), nullable(String.class), anyString()))
+            .thenReturn(mock(org.apache.cloudstack.api.BaseResponse.class));
+
+        guru.implement(tier, offering, mock(DeployDestination.class), mock(ReservationContext.class));
+
+        verify(tungstenFabricUtils, times(0))
+            .sendTungstenCommand(any(CreateTungstenLogicalRouterCommand.class), anyLong());
+        verify(tungstenService, times(1)).addNetworkGatewayToLogicalRouter(anyLong(), nullable(String.class),
+            eq(TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479")));
+    }
+
+    @Test
+    public void testVpcTierDoesNotTakeItsOwnSourceNatAddress() throws Exception {
+        // Source NAT belongs to the VPC, not to each tier.
+        final Network tier = guestNetworkReadyToImplement();
+        when(tier.getVpcId()).thenReturn(7L);
+        VpcVO vpc = mock(VpcVO.class);
+        when(vpc.getUuid()).thenReturn("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        when(vpcDao.findById(7L)).thenReturn(vpc);
+        when(tungstenService.addNetworkGatewayToLogicalRouter(anyLong(), nullable(String.class), anyString()))
+            .thenReturn(mock(org.apache.cloudstack.api.BaseResponse.class));
+
+        guru.implement(tier, offering, mock(DeployDestination.class), mock(ReservationContext.class));
+
+        verify(tungstenFabricUtils, times(0))
+            .sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong());
+        verify(ipAddressManager, times(0)).assignSourceNatPublicIpAddress(anyLong(), any(), any(), any(),
+            anyLong(), anyString(), anyBoolean(), anyBoolean());
+    }
+
+    @Test
+    public void testNonVpcNetworkStillGetsItsOwnLogicalRouterAndSourceNat() throws Exception {
+        // Guards the existing behaviour the re-scoping must not disturb.
+        final Network network = guestNetworkReadyToImplement();
+        when(network.getVpcId()).thenReturn(null);
+        when(tungstenFabricUtils.sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong()))
+            .thenReturn(new TungstenAnswer(new TungstenCommand(), true, "192.168.1.100"));
+        when(ipAddressDao.findByIpAndDcId(anyLong(), anyString())).thenReturn(mock(IPAddressVO.class));
+
+        guru.implement(network, offering, mock(DeployDestination.class), mock(ReservationContext.class));
+
+        verify(tungstenFabricUtils, times(1))
+            .sendTungstenCommand(any(CreateTungstenLogicalRouterCommand.class), anyLong());
+        verify(tungstenFabricUtils, times(1))
+            .sendTungstenCommand(any(GetTungstenNatIpCommand.class), anyLong());
+        verify(tungstenService, times(0)).addNetworkGatewayToLogicalRouter(anyLong(), nullable(String.class),
+            anyString());
     }
 }

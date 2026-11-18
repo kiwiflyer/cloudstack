@@ -174,6 +174,10 @@ public interface TungstenService {
 
     BaseResponse createRoutingLogicalRouter(final long zoneId, final String projectFqn, final String name);
 
+    /** With an explicit router UUID; see apache/cloudstack#7208. */
+    BaseResponse createRoutingLogicalRouter(final long zoneId, final String projectFqn, final String uuid,
+        final String name);
+
     BaseResponse addNetworkGatewayToLogicalRouter(final long zoneId, final String networkUuid,
         final String logicalRouterUuid);
 

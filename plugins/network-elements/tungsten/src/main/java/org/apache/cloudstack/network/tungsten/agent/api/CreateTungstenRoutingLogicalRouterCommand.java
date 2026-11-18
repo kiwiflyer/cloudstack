@@ -25,7 +25,15 @@ public class CreateTungstenRoutingLogicalRouterCommand extends TungstenCommand {
     private final String name;
 
     public CreateTungstenRoutingLogicalRouterCommand(final String projectFqn, final String name) {
-        this.uuid = UUID.randomUUID().toString();
+        this(projectFqn, UUID.randomUUID().toString(), name);
+    }
+
+    /**
+     * With an explicit UUID, so a VPC's logical router can be reached from the
+     * VPC alone (apache/cloudstack#7208).
+     */
+    public CreateTungstenRoutingLogicalRouterCommand(final String projectFqn, final String uuid, final String name) {
+        this.uuid = uuid;
         this.projectFqn = projectFqn;
         this.name = name;
     }

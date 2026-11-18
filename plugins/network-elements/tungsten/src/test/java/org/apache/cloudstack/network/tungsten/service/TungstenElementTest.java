@@ -997,16 +997,17 @@ public class TungstenElementTest {
         Vpc vpc = mock(Vpc.class);
         when(vpc.getId()).thenReturn(7L);
         when(vpc.getZoneId()).thenReturn(1L);
-        when(tungstenService.createRoutingLogicalRouter(anyLong(), nullable(String.class), anyString()))
+        when(vpc.getUuid()).thenReturn("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        when(tungstenService.createRoutingLogicalRouter(anyLong(), nullable(String.class), anyString(), anyString()))
             .thenReturn(mock(org.apache.cloudstack.api.BaseResponse.class));
 
         boolean implemented = tungstenElement.implementVpc(vpc, mock(DeployDestination.class),
             mock(ReservationContext.class));
 
         assertTrue(implemented);
-        verify(tungstenService, times(1))
-            .createRoutingLogicalRouter(eq(1L), nullable(String.class),
-                eq(TungstenUtils.getVpcLogicalRouterName(7L)));
+        verify(tungstenService, times(1)).createRoutingLogicalRouter(eq(1L), nullable(String.class),
+            eq(TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479")),
+            eq(TungstenUtils.getVpcLogicalRouterName(7L)));
     }
 
     @Test

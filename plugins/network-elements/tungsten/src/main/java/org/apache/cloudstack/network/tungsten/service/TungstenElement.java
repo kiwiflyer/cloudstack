@@ -1216,7 +1216,10 @@ public class TungstenElement extends AdapterBase
     @Override
     public boolean implementVpc(Vpc vpc, DeployDestination dest, ReservationContext context) {
         String projectFqn = tungstenService.getTungstenProjectFqn(vpc.getAccountId(), vpc.getDomainId());
+        // The UUID is derived from the VPC, so each tier can attach to this
+        // router later without a lookup or a stored identifier.
         BaseResponse response = tungstenService.createRoutingLogicalRouter(vpc.getZoneId(), projectFqn,
+            TungstenUtils.getVpcLogicalRouterUuid(vpc.getUuid()),
             TungstenUtils.getVpcLogicalRouterName(vpc.getId()));
         if (response == null) {
             throw new CloudRuntimeException(

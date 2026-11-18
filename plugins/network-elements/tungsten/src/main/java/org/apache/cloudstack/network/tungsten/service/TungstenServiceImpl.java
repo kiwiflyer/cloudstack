@@ -2369,8 +2369,14 @@ public class TungstenServiceImpl extends ManagerBase implements TungstenService 
 
     @Override
     public BaseResponse createRoutingLogicalRouter(final long zoneId, final String projectFqn, final String name) {
+        return createRoutingLogicalRouter(zoneId, projectFqn, java.util.UUID.randomUUID().toString(), name);
+    }
+
+    @Override
+    public BaseResponse createRoutingLogicalRouter(final long zoneId, final String projectFqn, final String uuid,
+        final String name) {
         DataCenter dataCenter = dataCenterDao.findById(zoneId);
-        TungstenCommand tungstenCommand = new CreateTungstenRoutingLogicalRouterCommand(projectFqn, name);
+        TungstenCommand tungstenCommand = new CreateTungstenRoutingLogicalRouterCommand(projectFqn, uuid, name);
         TungstenAnswer tungstenAnswer = tungstenFabricUtils.sendTungstenCommand(tungstenCommand, zoneId);
         if (tungstenAnswer.getResult()) {
             return new TungstenFabricLogicalRouterResponse((TungstenLogicalRouter) tungstenAnswer.getTungstenModel(), dataCenter);
