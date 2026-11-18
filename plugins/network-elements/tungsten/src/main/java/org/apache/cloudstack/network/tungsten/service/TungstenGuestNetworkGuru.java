@@ -43,6 +43,8 @@ import com.cloud.network.dao.IPAddressVO;
 import com.cloud.network.dao.NetworkDao;
 import com.cloud.network.dao.NetworkDetailVO;
 import com.cloud.network.dao.NetworkDetailsDao;
+import com.cloud.network.vpc.VpcVO;
+import com.cloud.network.vpc.dao.VpcDao;
 import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.dao.TungstenProviderDao;
@@ -119,6 +121,8 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
     TungstenProviderDao tungstenProviderDao;
     @Inject
     NetworkOfferingServiceMapDao networkOfferingServiceMapDao;
+    @Inject
+    VpcDao vpcDao;
 
     private static final Networks.TrafficType[] TrafficTypes = {Networks.TrafficType.Guest};
 
@@ -286,6 +290,20 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
                     throw new CloudRuntimeException("can not allocate Tungsten-Fabric Dns Ip Address");
                 }
 
+                // apache/cloudstack#7208: a VPC tier joins the VPC's logical
+                // router instead of getting one of its own, so the VPC's tiers
+                // can route to each other. Source NAT, the public-network
+                // policy and the gateway VMI all belong to the VPC too, so the
+                // whole block below is skipped for a tier.
+                // A positive id, not merely non-null: CloudStack ids start at 1,
+                // and a Mockito-mocked Network returns 0L rather than null for a
+                // boxed Long, which would otherwise send every mocked network
+                // down the VPC path.
+                if (network.getVpcId() != null && network.getVpcId() > 0) {
+                    attachTierToVpcLogicalRouter(network);
+                    return implemented;
+                }
+
                 // create logical router with public network
                 TungstenAnswer createLogicalRouterAnswer = createTungstenLogicalRouter(network, tungstenProjectFqn);
 
@@ -338,7 +356,10 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
                 createTungstenVmiGateway(network, tungstenProjectFqn);
             }
         } catch (Exception ex) {
-            throw new CloudRuntimeException(String.format("unable to create Tungsten-Fabric network %s", network));
+            // Keep the cause: without it every failure in this block surfaces
+            // as the same opaque message.
+            throw new CloudRuntimeException(
+                String.format("unable to create Tungsten-Fabric network %s", network), ex);
         }
         return implemented;
     }
@@ -540,6 +561,29 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
             Thread.sleep(natIpRetryDelayMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        }
+    }
+
+    /**
+     * Attaches a VPC tier to its VPC's logical router.
+     *
+     * The router's UUID is derived from the VPC's own UUID
+     * ({@link TungstenUtils#getVpcLogicalRouterUuid}), so the tier reaches it
+     * without a lookup or a stored identifier. The router itself is created by
+     * {@code TungstenElement.implementVpc} before any tier is implemented.
+     */
+    private void attachTierToVpcLogicalRouter(Network tier) {
+        VpcVO vpc = vpcDao.findById(tier.getVpcId());
+        if (vpc == null) {
+            throw new CloudRuntimeException(
+                String.format("can not find the VPC owning tier %s", tier));
+        }
+
+        String logicalRouterUuid = TungstenUtils.getVpcLogicalRouterUuid(vpc.getUuid());
+        if (tungstenService.addNetworkGatewayToLogicalRouter(tier.getDataCenterId(), tier.getUuid(),
+            logicalRouterUuid) == null) {
+            throw new CloudRuntimeException(String.format(
+                "can not attach tier %s to the Tungsten-Fabric logical router of its VPC", tier));
         }
     }
 

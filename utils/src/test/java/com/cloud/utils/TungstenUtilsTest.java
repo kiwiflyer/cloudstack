@@ -159,4 +159,44 @@ public class TungstenUtilsTest {
         assertEquals("acs-instanceV6IpGuestUser12",
             TungstenUtils.getV6InstanceIpName("Guest", "User", "i-2-34-VM", 12L));
     }
+
+    // --- VPC logical router identity (apache/cloudstack#7208) -------------
+
+    @Test
+    public void testVpcLogicalRouterUuidIsDerivedFromTheVpcAndIsStable() {
+        // Tiers implement after the VPC, in separate calls, and must reach the
+        // same router without a lookup or a stored id. Deriving it from the
+        // VPC's own UUID makes it reproducible from the VPC alone.
+        String first = TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        String second = TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+
+        assertEquals(first, second);
+        assertEquals("must be a well-formed UUID", 36, first.length());
+        java.util.UUID.fromString(first);
+    }
+
+    @Test
+    public void testDifferentVpcsGetDifferentLogicalRouterUuids() {
+        assertNotEquals(
+            TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+            TungstenUtils.getVpcLogicalRouterUuid("9f1a7c52-1d4e-4b2a-9c3f-7a5e2d8b6c10"));
+    }
+
+    @Test
+    public void testVpcLogicalRouterUuidIsNotTheVpcUuidItself() {
+        // They name different objects in different systems; reusing the VPC's
+        // own UUID for a fabric object invites confusion.
+        String vpcUuid = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+        assertNotEquals(vpcUuid, TungstenUtils.getVpcLogicalRouterUuid(vpcUuid));
+    }
+
+    @Test
+    public void testVpcLogicalRouterUuidIsIndependentOfTheDeploymentPrefix() {
+        // The prefix disambiguates NAMES. A UUID is already globally unique, and
+        // changing it with the prefix would make an existing VPC's router
+        // unreachable if the prefix were ever set.
+        String withoutPrefix = TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+        TungstenUtils.setDeploymentPrefix("acs-london");
+        assertEquals(withoutPrefix, TungstenUtils.getVpcLogicalRouterUuid("f47ac10b-58cc-4372-a567-0e02b2c3d479"));
+    }
 }

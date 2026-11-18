@@ -21,6 +21,7 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 public class TungstenUtils {
 
@@ -126,6 +127,25 @@ public class TungstenUtils {
      */
     public static String getVpcLogicalRouterName(long vpcId) {
         return scoped("vpcLogicalRouter" + vpcId);
+    }
+
+    /**
+     * The UUID of the logical router backing a VPC, derived from the VPC's own
+     * UUID (apache/cloudstack#7208).
+     *
+     * A VPC's tiers are implemented in separate calls, after the VPC itself, and
+     * each needs to attach to the same router. Deriving the router's UUID from
+     * the VPC makes it reachable from the VPC alone -- no lookup by name, and no
+     * identifier to store and keep in step.
+     *
+     * Deliberately NOT affected by the deployment prefix: a prefix disambiguates
+     * names, while a UUID is already globally unique. Making it prefix-dependent
+     * would make an existing VPC's router unreachable the moment a prefix was
+     * set.
+     */
+    public static String getVpcLogicalRouterUuid(final String vpcUuid) {
+        return UUID.nameUUIDFromBytes(("opensdn-vpc-logical-router:" + vpcUuid)
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
     }
 
     /** The network policy carrying a VPC tier's network ACL. */
