@@ -1061,4 +1061,29 @@ public class TungstenElementTest {
             assertNotNull(expected);
         }
     }
+
+    @Test
+    public void testElementSupportsEverySerivceTheVpcOfferingAssignsToIt() {
+        // VpcManagerImpl seeds "VPC offering with OpenSDN" mapping every VPC
+        // service to Provider.Tungsten except UserData (ConfigDrive) and Vpn
+        // (omitted -- no native equivalent). If the element stops advertising
+        // one of these, the seeded offering silently names a provider that
+        // cannot deliver the service, so this pins the pair together.
+        Map<Network.Service, Map<Network.Capability, String>> capabilities = tungstenElement.getCapabilities();
+
+        for (Network.Service service : java.util.List.of(
+                Network.Service.Dhcp, Network.Service.Dns, Network.Service.Gateway, Network.Service.Lb,
+                Network.Service.NetworkACL, Network.Service.PortForwarding, Network.Service.SourceNat,
+                Network.Service.StaticNat)) {
+            assertTrue(service + " is mapped to this provider by the seeded VPC offering but not advertised",
+                capabilities.containsKey(service));
+        }
+    }
+
+    @Test
+    public void testElementDoesNotClaimVpnWhichTheVpcOfferingOmits() {
+        // The offering omits Vpn deliberately; the element must not claim it
+        // either, or the two descriptions disagree.
+        assertFalse(tungstenElement.getCapabilities().containsKey(Network.Service.Vpn));
+    }
 }
