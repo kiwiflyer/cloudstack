@@ -66,6 +66,14 @@ public class TungstenFabricProviderResponse extends BaseResponse {
     @Param(description = "Tungsten-Fabric provider introspect port")
     private String introspectPort;
 
+    @SerializedName(ApiConstants.OPENSDN_VERSION)
+    @Param(description = "OpenSDN controller version, null when unknown. Newer capabilities are gated on it.")
+    private String openSdnVersion;
+
+    @SerializedName(ApiConstants.OPENSDN_VERSION_DETECTED)
+    @Param(description = "true if the version was probed from the controller, false if declared by the operator")
+    private boolean versionDetected;
+
     public long getZoneId() {
         return zoneId;
     }
@@ -128,6 +136,22 @@ public class TungstenFabricProviderResponse extends BaseResponse {
 
     public void setGateway(final String gateway) {
         this.gateway = gateway;
+    }
+
+    public String getOpenSdnVersion() {
+        return openSdnVersion;
+    }
+
+    public void setOpenSdnVersion(final String openSdnVersion) {
+        this.openSdnVersion = openSdnVersion;
+    }
+
+    public boolean isVersionDetected() {
+        return versionDetected;
+    }
+
+    public void setVersionDetected(final boolean versionDetected) {
+        this.versionDetected = versionDetected;
     }
 
     public String getIntrospectPort() {

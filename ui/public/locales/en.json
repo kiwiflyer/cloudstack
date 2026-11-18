@@ -1,4 +1,6 @@
 {
+"label.opensdnversion": "OpenSDN version",
+"label.versiondetected": "Version detected from controller",
 "message.delete.account.not.disabled": "Please disable the account before attempting to delete it.",
 "alert.service.domainrouter": "Domain Router",
 "error.dedicate.bgp.peer.failed":"Failed to dedicate BGP peer",

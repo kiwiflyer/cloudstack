@@ -983,6 +983,8 @@ public class ApiConstants {
     public static final String TUNGSTEN_GATEWAY = "tungstengateway";
     public static final String TUNGSTEN_PROVIDER_VROUTER_PORT = "tungstenprovidervrouterport";
     public static final String TUNGSTEN_PROVIDER_INTROSPECT_PORT = "tungstenproviderintrospectport";
+    public static final String OPENSDN_VERSION = "opensdnversion";
+    public static final String OPENSDN_VERSION_DETECTED = "versiondetected";
     public static final String SRC_NETWORK = "srcnetwork";
     public static final String SRC_IP_PREFIX = "srcipprefix";
     public static final String SRC_IP_PREFIX_LEN = "srcipprefixlen";

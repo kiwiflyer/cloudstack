@@ -1378,7 +1378,7 @@ export default {
         },
         'zonename'
       ],
-      details: ['name', 'tungstengateway', 'tungstenproviderhostname', 'tungstenproviderintrospectport', 'tungstenproviderport', 'tungstenprovideruuid', 'tungstenprovidervrouterport', 'zonename'],
+      details: ['name', 'opensdnversion', 'versiondetected', 'tungstengateway', 'tungstenproviderhostname', 'tungstenproviderintrospectport', 'tungstenproviderport', 'tungstenprovideruuid', 'tungstenprovidervrouterport', 'zonename'],
       resourceType: 'TungstenFabric',
       tabs: [
         {

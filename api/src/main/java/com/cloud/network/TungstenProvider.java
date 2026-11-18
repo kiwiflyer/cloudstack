@@ -26,6 +26,15 @@ public interface TungstenProvider extends InternalIdentity, Identity {
     String getGateway();
     String getIntrospectPort();
     String getVrouterPort();
+    /**
+     * The OpenSDN controller version, or null when unknown. Newer capabilities
+     * are gated on it; null resolves to the baseline set.
+     */
+    String getOpenSdnVersion();
+
+    /** True when the version was probed from the controller rather than declared. */
+    boolean isVersionDetected();
+
     long getZoneId();
     long getHostId();
 }
