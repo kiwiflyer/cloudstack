@@ -195,21 +195,48 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
         super.deallocate(config, nic, vm);
         String tungstenProjectFqn = tungstenService.getTungstenProjectFqn(config);
 
+        // apache/cloudstack#7771: every step below is attempted independently.
+        //
+        // These calls throw when the object is absent, and when the zone has no
+        // provider registered at all. Both happen routinely here: a VM whose
+        // deployment failed part-way never got all of its fabric objects, and a
+        // zone created with Tungsten isolation while the plugin was disabled has
+        // no provider. Previously the first failure propagated and abandoned the
+        // rest of the cleanup, so the fabric VM object and its addresses were
+        // left behind and the next deployment failed with "IP address already in
+        // use" -- the leak this issue reports.
+        //
+        // Cleanup therefore logs failures rather than aborting on them. Giving
+        // up half way guarantees a leak; carrying on removes everything that can
+        // be removed and leaves a record of what could not.
+
         // delete instance ip and vmi
         String nicName = TungstenUtils.getVmiName(config.getTrafficType().toString(), vm.getType().toString(),
             vm.getInstanceName(), nic.getId());
-        TungstenCommand deleteVmiCmd = new DeleteTungstenVmInterfaceCommand(tungstenProjectFqn, nicName);
-        tungstenFabricUtils.sendTungstenCommand(deleteVmiCmd, config.getDataCenterId());
+        removeFabricObjectQuietly(new DeleteTungstenVmInterfaceCommand(tungstenProjectFqn, nicName),
+            config.getDataCenterId(), String.format("virtual machine interface %s", nicName));
 
         List<NicVO> nics = _nicDao.listByVmId(vm.getId());
         if (nics.size() == 1) {
-            try {
-                // delete tungsten vm
-                DeleteTungstenVmCommand cmd = new DeleteTungstenVmCommand(vm.getUuid());
-                tungstenFabricUtils.sendTungstenCommand(cmd, config.getDataCenterId());
-            } catch (IllegalArgumentException e) {
-                throw new CloudRuntimeException(String.format("Failing to expunge the vm %s from Tungsten-Fabric", vm));
-            }
+            // delete tungsten vm
+            removeFabricObjectQuietly(new DeleteTungstenVmCommand(vm.getUuid()), config.getDataCenterId(),
+                String.format("virtual machine %s", vm));
+        }
+    }
+
+    /**
+     * Sends a delete command, treating failure as non-fatal.
+     *
+     * Only for cleanup paths. A failure here usually means the object was never
+     * created or is already gone, neither of which should stop the remaining
+     * cleanup. See apache/cloudstack#7771.
+     */
+    private void removeFabricObjectQuietly(TungstenCommand command, long zoneId, String description) {
+        try {
+            tungstenFabricUtils.sendTungstenCommand(command, zoneId);
+        } catch (RuntimeException e) {
+            logger.warn("Could not remove {} from Tungsten-Fabric during cleanup; continuing with the remaining "
+                + "cleanup steps. Reason: {}", description, e.getMessage());
         }
     }
 
