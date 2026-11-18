@@ -77,4 +77,27 @@ public class CreateTungstenFabricProviderCmdTest {
         createTungstenFabricProviderCmd.execute();
         Assert.assertEquals(tungstenFabricProviderResponse, createTungstenFabricProviderCmd.getResponseObject());
     }
+
+    @Test
+    public void testGatewayIsOptional() throws Exception {
+        // apache/cloudstack#7461: the gateway was mandatory, so operators using
+        // gatewayless forwarding had to enter a dummy IP to get past the zone
+        // wizard. It is optional now; #7463 provides the gatewayless path.
+        java.lang.reflect.Field field = CreateTungstenFabricProviderCmd.class.getDeclaredField("gateway");
+        org.apache.cloudstack.api.Parameter parameter =
+            field.getAnnotation(org.apache.cloudstack.api.Parameter.class);
+
+        Assert.assertNotNull("gateway must still be an API parameter", parameter);
+        Assert.assertFalse("the provider gateway must not be mandatory", parameter.required());
+    }
+
+    @Test
+    public void testHostnameRemainsMandatory() throws Exception {
+        // Guards against relaxing more than intended.
+        java.lang.reflect.Field field = CreateTungstenFabricProviderCmd.class.getDeclaredField("hostname");
+        org.apache.cloudstack.api.Parameter parameter =
+            field.getAnnotation(org.apache.cloudstack.api.Parameter.class);
+
+        Assert.assertTrue("the provider hostname must stay mandatory", parameter.required());
+    }
 }

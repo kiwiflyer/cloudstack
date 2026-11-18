@@ -46,6 +46,7 @@ import com.cloud.network.dao.NetworkDetailsDao;
 import com.cloud.network.dao.NetworkVO;
 import com.cloud.network.dao.PhysicalNetworkVO;
 import com.cloud.network.dao.TungstenProviderDao;
+import com.cloud.network.element.TungstenProviderVO;
 import com.cloud.network.guru.GuestNetworkGuru;
 import com.cloud.network.rules.FirewallRule;
 import com.cloud.network.rules.FirewallRuleVO;
@@ -65,6 +66,7 @@ import com.cloud.vm.VMInstanceVO;
 import com.cloud.vm.VirtualMachine;
 import com.cloud.vm.VirtualMachineProfile;
 import com.cloud.vm.dao.VMInstanceDao;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.cloudstack.network.tungsten.agent.api.ClearTungstenNetworkGatewayCommand;
 import org.apache.cloudstack.network.tungsten.agent.api.CreateTungstenLogicalRouterCommand;
 import org.apache.cloudstack.network.tungsten.agent.api.CreateTungstenNetworkCommand;
@@ -445,12 +447,26 @@ public class TungstenGuestNetworkGuru extends GuestNetworkGuru implements Networ
         }
     }
 
+    /**
+     * apache/cloudstack#7463: routing from guest networks to public networks
+     * normally goes through the gateway vRouter named by the provider. When no
+     * gateway is configured there is no such route, so the network falls back
+     * to IP fabric SNAT.
+     *
+     * A missing provider is treated as "no gateway" deliberately: losing
+     * connectivity silently is worse than enabling a gatewayless path.
+     */
+    boolean shouldUseFabricSnat(TungstenProviderVO tungstenProvider) {
+        return tungstenProvider == null || StringUtils.isBlank(tungstenProvider.getGateway());
+    }
+
     private void createTungstenNetwork(Network network, String tungstenProjectFqn) {
         Pair<String, Integer> pair = NetUtils.getCidr(network.getCidr());
+        boolean fabricSnat = shouldUseFabricSnat(tungstenProviderDao.findByZoneId(network.getDataCenterId()));
         TungstenCommand createTungstenGuestNetworkCommand = new CreateTungstenNetworkCommand(network.getUuid(),
             TungstenUtils.getGuestNetworkName(network.getName(), network.getUuid()), network.getName(), tungstenProjectFqn, false, false,
             pair.first(), pair.second(), null, network.getMode().equals(Networks.Mode.Dhcp), null, null,
-            null, false, false, TungstenUtils.getSubnetName(network.getId()));
+            null, false, false, TungstenUtils.getSubnetName(network.getId()), fabricSnat);
 
         TungstenAnswer tungstenAnswer = tungstenFabricUtils.sendTungstenCommand(createTungstenGuestNetworkCommand, network.getDataCenterId());
 

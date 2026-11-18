@@ -53,7 +53,10 @@ public class CreateTungstenFabricProviderCmd extends BaseCmd {
     @Parameter(name = ApiConstants.TUNGSTEN_PROVIDER_PORT, type = CommandType.STRING, description = "Tungsten-Fabric provider port")
     private String port;
 
-    @Parameter(name = ApiConstants.TUNGSTEN_GATEWAY, type = CommandType.STRING, required = true, description = "Tungsten-Fabric provider gateway")
+    // apache/cloudstack#7461: the gateway was mandatory, so operators running
+    // gatewayless had to enter a dummy IP to get past the zone wizard. When it
+    // is absent, guest networks fall back to IP fabric SNAT (#7463).
+    @Parameter(name = ApiConstants.TUNGSTEN_GATEWAY, type = CommandType.STRING, description = "Tungsten-Fabric provider gateway. Optional: when absent, guest networks use IP fabric SNAT to reach the underlay.")
     private String gateway;
 
     @Parameter(name = ApiConstants.TUNGSTEN_PROVIDER_VROUTER_PORT, type = CommandType.STRING, description = "Tungsten-Fabric provider vrouter port")

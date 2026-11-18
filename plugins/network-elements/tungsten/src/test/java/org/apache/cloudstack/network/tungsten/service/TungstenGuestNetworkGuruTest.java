@@ -601,4 +601,38 @@ public class TungstenGuestNetworkGuruTest {
             assertEquals(TungstenUtils.TWO_WAY_DIRECTION, intra.getDirection());
         }
     }
+
+    @Test
+    public void testFabricSnatRequestedWhenProviderHasNoGateway() {
+        // apache/cloudstack#7463: a provider with no gateway vRouter must fall
+        // back to IP fabric SNAT so guest networks still reach the outside.
+        TungstenProviderVO provider = mock(TungstenProviderVO.class);
+        when(provider.getGateway()).thenReturn(null);
+
+        assertTrue("no gateway means fabric SNAT is required",
+            guru.shouldUseFabricSnat(provider));
+    }
+
+    @Test
+    public void testFabricSnatRequestedWhenProviderGatewayIsBlank() {
+        TungstenProviderVO provider = mock(TungstenProviderVO.class);
+        when(provider.getGateway()).thenReturn("   ");
+
+        assertTrue("a blank gateway is no gateway", guru.shouldUseFabricSnat(provider));
+    }
+
+    @Test
+    public void testFabricSnatNotRequestedWhenProviderHasAGateway() {
+        TungstenProviderVO provider = mock(TungstenProviderVO.class);
+        when(provider.getGateway()).thenReturn("192.0.2.1");
+
+        assertFalse("with a gateway vRouter, routing goes through it",
+            guru.shouldUseFabricSnat(provider));
+    }
+
+    @Test
+    public void testFabricSnatRequestedWhenProviderIsMissing() {
+        assertTrue("an absent provider must not silently lose connectivity",
+            guru.shouldUseFabricSnat(null));
+    }
 }

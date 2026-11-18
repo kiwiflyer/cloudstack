@@ -245,9 +245,11 @@ public class TungstenResourceTest {
             "testNetworkName", "testNetworkDisplayName", "projectFqn", false, false, "192.168.1.0", 24, "192.168.1.1",
             true, "192.168.1.253", "192.168.1.100", "192.168.1.200", false, false, "subnet");
         VirtualNetwork virtualNetwork = mock(VirtualNetwork.class);
+        // TungstenResource now calls the overload carrying the fabricSnat flag
+        // (apache/cloudstack#7463), so the stub must match that signature.
         when(tungstenApi.createTungstenNetwork(anyString(), anyString(), anyString(), anyString(), anyBoolean(),
             anyBoolean(), anyString(), anyInt(), anyString(), anyBoolean(), anyString(), anyString(), anyString(),
-            anyBoolean(), anyBoolean(), anyString())).thenReturn(virtualNetwork);
+            anyBoolean(), anyBoolean(), anyString(), anyBoolean())).thenReturn(virtualNetwork);
         TungstenAnswer answer = (TungstenAnswer) tungstenResource.executeRequest(command);
         assertTrue(answer.getResult());
         assertEquals(virtualNetwork, answer.getApiObjectBase());
