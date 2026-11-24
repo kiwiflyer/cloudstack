@@ -277,6 +277,7 @@ cmk update networkserviceprovider id=<nsp-uuid> state=Enabled
 | `ovn_dhcp_lease_time` | no | `86400` | DHCP `lease_time` option |
 | `ovn_port_security` | no | `true` | Set `port_security` on each LSP |
 | `ovn_pf_max_ports` | no | `128` | Max VIPs one port-forward rule may expand into |
+| `ovn_distributed_nat` | no | `false` | Process static NAT on the workload's own chassis. **Requires the provider bridge mapping on every chassis** — see §8a |
 | `ovn_private_physnet` | no | `ovn_public_physnet` | Provider name for VPC private gateways |
 | `ovn_evpn_enabled` | no | `false` | Tag switches for `ovn-bgp-agent` |
 | `ovn_evpn_type` | no | `l3` | `l3` (route the subnet into a VRF) or `l2` (stretch the segment) |
@@ -485,6 +486,26 @@ accepts it, but nothing advertises yet.
 drops longer ones, so the names are built to fit the widest legal VNI:
 `cse-br-<vni>` and `cse-ad-<vni>` are 15 characters at a 24-bit VNI. The VXLAN
 device is shared and named by `ovn_evpn_vxlan_dev`.
+
+**Floating IPs need `ovn_distributed_nat`.** The `nat` redistribute token
+advertises the external IP and MAC of *distributed* `dnat_and_snat` entries only.
+CloudStack static NAT is centralized by default — `external_mac` and
+`logical_port` unset — so with the default, enabling `nat` advertises nothing at
+all. Setting `ovn_distributed_nat=true` makes `add-static-nat` write the
+six-argument form instead, and the external MAC is derived from the floating IP's
+own octets (192.0.2.11 becomes `02:05:c0:00:02:0b`), which is unique on the
+provider switch by construction and stable across re-runs.
+
+It is off by default for a reason that has nothing to do with EVPN: a distributed
+rule is processed on the chassis the workload sits on, so **every** chassis needs
+the provider `ovn-bridge-mappings` entry that `ovn-host-setup.sh --role gateway`
+adds. Turn this on where only some hosts are gateways and static NAT breaks on the
+rest. If a floating IP's address is on no logical port, the script logs why and
+falls back to a centralized rule rather than failing the operation.
+
+For the advertisement itself the gateway port's switch must also carry an L2 VNI
+with `nat` in its redistribute list, for example
+`evpn_redistribute=fdb,ip,nat`.
 
 **One finding worth repeating.** The Type-5 examples in circulation set only
 `dynamic-routing-bridge-ifname` and `dynamic-routing-vxlan-ifname` on the per-VPC
@@ -727,12 +748,14 @@ real hosts.
 ./test-with-ovn.sh --evpn      # needs OVN 26.09 or later; exits early otherwise
 ```
 
-44 assertions against a real 26.09 northbound database: the L2 VNI and all three
+52 assertions against a real 26.09 northbound database: the L2 VNI and all three
 interface names on a tier switch, all three `evpnadvertise` values, the VPC's VRF
 and Type-5 anchor with its gateway chassis, `gateway_port` pinned on the NAT rows,
-stale-VNI pruning, six guards (VNI 0, over 24 bits, non-numeric, unknown advertise
-value, no target, and native commands refused in agent mode), and teardown that
-leaves the VPC router standing.
+stale-VNI pruning, both static NAT paths (centralized by default, distributed
+under `ovn_distributed_nat`, and the fallback when the address is on no port),
+six guards (VNI 0, over 24 bits, non-numeric, unknown advertise value, no target,
+and native commands refused in agent mode), and teardown that leaves the VPC
+router standing.
 
 Two of those assertions check that `ovn-northd` republishes the VNI and the VRF id
 into the southbound `Datapath_Binding`. That is what lets a host-side reconciler

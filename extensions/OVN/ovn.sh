@@ -261,6 +261,54 @@ dhcp_server_mac() { _derived_mac 00 "$1"; }
 guest_lrp_mac()   { _derived_mac 01 "$1"; }
 pgw_lrp_mac()     { _derived_mac 04 "$1"; }
 
+# ---------------------------------------------------------------------------
+# Distributed static NAT (opt-in)
+#
+# ovn-nbctl's lr-nat-add takes an optional logical port and external MAC. With
+# them, OVN processes the rule on the chassis the workload is on; without them
+# it processes it centrally on the gateway chassis. CloudStack static NAT has
+# always been centralized here, and that stays the default, because distributed
+# processing requires EVERY chassis to reach the provider network -- the
+# ovn-bridge-mappings entry that ovn-host-setup.sh adds under --role gateway.
+# Turning this on without that mapping everywhere breaks static NAT on the hosts
+# that lack it.
+#
+# It matters for EVPN: the nat redistribute token advertises the external IP and
+# MAC of DISTRIBUTED dnat_and_snat entries only, so with centralized rows it
+# advertises nothing at all.
+# ---------------------------------------------------------------------------
+
+DISTRIBUTED_NAT="$(printf '%s' "$(phys ovn_distributed_nat)" | tr '[:upper:]' '[:lower:]')"
+[ -n "${DISTRIBUTED_NAT}" ] || DISTRIBUTED_NAT="false"
+
+# The external MAC must be unique on the logical switch the gateway port is
+# attached to. Deriving it from the floating IP's own four octets makes it
+# unique by construction and stable across calls, so re-running add-static-nat
+# rewrites the same row instead of churning the MAC.
+nat_external_mac() {
+    local ip="$1" rest o1 o2 o3 o4
+    o1="${ip%%.*}"; rest="${ip#*.}"
+    o2="${rest%%.*}"; rest="${rest#*.}"
+    o3="${rest%%.*}"; o4="${rest#*.}"
+    case "${o1}:${o2}:${o3}:${o4}" in *[!0-9:]*|*::*) return 1 ;; esac
+    [ -n "${o4}" ] || return 1
+    printf '02:05:%02x:%02x:%02x:%02x' "${o1}" "${o2}" "${o3}" "${o4}" 2>/dev/null
+}
+
+# The port the private IP sits on. Distributed NAT is processed on that port's
+# own chassis, so without it there is nothing to distribute to.
+lsp_for_ip() {
+    local ls="$1" ip="$2" port addrs
+    for port in $(nbctl lsp-list "${ls}" 2>/dev/null | sed -n 's/.*(\(.*\))$/\1/p'); do
+        [ -n "$(nbctl lsp-get-type "${port}" 2>/dev/null)" ] && continue
+        addrs="$(nbctl lsp-get-addresses "${port}" 2>/dev/null)"
+        case " ${addrs} " in
+            *" ${ip} "*) printf '%s' "${port}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # VPC private gateway objects, keyed by the gateway id.
 pgw_ls_name()  { printf 'cs-pgw-%s' "$1"; }
 pgw_ln_name()  { printf 'cs-pgw-ln-%s' "$1"; }
@@ -1090,11 +1138,30 @@ cmd_add_static_nat() {
     require_router "${network_id}"
     lr="$(lr_name "${network_id}")"
 
-    log "adding dnat_and_snat ${public_ip} <-> ${private_ip} on ${lr}"
+    local lsp="" ext_mac=""
+    if [ "${DISTRIBUTED_NAT}" = "true" ]; then
+        if lsp="$(lsp_for_ip "$(ls_name "${network_id}")" "${private_ip}")" && [ -n "${lsp}" ]; then
+            ext_mac="$(nat_external_mac "${public_ip}")" || ext_mac=""
+            [ -n "${ext_mac}" ] || log "could not derive an external MAC from ${public_ip}; staying centralized"
+        else
+            lsp=""
+            log "ovn_distributed_nat is on, but no logical port on $(ls_name "${network_id}") holds ${private_ip}; staying centralized"
+        fi
+    fi
+
+    log "adding dnat_and_snat ${public_ip} <-> ${private_ip} on ${lr} (${lsp:+distributed via ${lsp}}${lsp:-centralized})"
     # Replace any stale mapping for this external IP first so a re-point is clean.
     nbctl -- --if-exists lr-nat-del "${lr}" dnat_and_snat "${public_ip}" >/dev/null 2>&1 || true
-    nbctl -- lr-nat-add "${lr}" dnat_and_snat "${public_ip}" "${private_ip}" >/dev/null \
-        || emit_failure "failed to add static NAT ${public_ip} -> ${private_ip}"
+    if [ -n "${lsp}" ] && [ -n "${ext_mac}" ]; then
+        # The six-argument form is what makes the rule distributed, and what the
+        # EVPN nat token needs in order to advertise anything.
+        nbctl -- lr-nat-add "${lr}" dnat_and_snat "${public_ip}" "${private_ip}" \
+            "${lsp}" "${ext_mac}" >/dev/null \
+            || emit_failure "failed to add distributed static NAT ${public_ip} -> ${private_ip}"
+    else
+        nbctl -- lr-nat-add "${lr}" dnat_and_snat "${public_ip}" "${private_ip}" >/dev/null \
+            || emit_failure "failed to add static NAT ${public_ip} -> ${private_ip}"
+    fi
 
     nbctl --wait=sb sync >/dev/null || log "warning: --wait=sb sync timed out"
     emit_success

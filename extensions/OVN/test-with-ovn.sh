@@ -232,6 +232,35 @@ if [ "${1:-}" = "--evpn" ]; then
     expect_absent "stale anchor port pruned" "cs-lrp-evpn-$L3VNI" --bare --columns=name find Logical_Router_Port "name=cs-lrp-evpn-$L3VNI"
 
     echo
+    echo "----- distributed static NAT (what the nat token needs) -----"
+    # The nat redistribute token advertises DISTRIBUTED dnat_and_snat entries
+    # only. CloudStack static NAT is centralized by default and stays that way,
+    # because distributing it requires every chassis to reach the provider
+    # network -- so this is opt-in, and both paths are pinned here.
+    evpn_run "prepare a VM port to attach a floating IP to" prepare-nic \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"nic_uuid\":\"nic-fip\",\"mac\":\"02:00:0a:02:01:63\",\"ip\":\"10.2.1.99\",\"cidr\":\"10.2.1.0/24\",\"gateway\":\"10.2.1.1\"}"
+
+    evpn_run "add-static-nat, flag off" add-static-nat \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"public_ip\":\"192.0.2.31\",\"private_ip\":\"10.2.1.99\"}"
+    expect_absent "stays centralized by default" "02:05:" --bare --columns=external_mac find NAT "external_ip=\"192.0.2.31\""
+
+    evpn_run "add-static-nat, ovn_distributed_nat=true" add-static-nat \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"public_ip\":\"192.0.2.31\",\"private_ip\":\"10.2.1.99\"}" \
+      "$EVPN_PHYS,\"ovn_distributed_nat\":\"true\""
+    # 192.0.2.31 -> c0:00:02:1f, so the MAC is unique per floating IP by
+    # construction and the same on every re-run.
+    expect_match "external MAC derived from the floating IP" "02:05:c0:00:02:1f" \
+        --bare --columns=external_mac find NAT "external_ip=\"192.0.2.31\""
+    expect_match "logical port set, which is what distributes it" "nic-fip" \
+        --bare --columns=logical_port find NAT "external_ip=\"192.0.2.31\""
+
+    evpn_run "add-static-nat for an address on no port" add-static-nat \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"public_ip\":\"192.0.2.32\",\"private_ip\":\"10.2.1.250\"}" \
+      "$EVPN_PHYS,\"ovn_distributed_nat\":\"true\""
+    expect_absent "falls back to centralized rather than failing" "02:05:" \
+        --bare --columns=external_mac find NAT "external_ip=\"192.0.2.32\""
+
+    echo
     echo "----- guards -----"
     evpn_reject "VNI 0 refused"              config-evpn-network "{\"network_id\":\"100\",\"evpn_vni\":\"0\"}"
     evpn_reject "VNI above 24 bits refused"  config-evpn-network "{\"network_id\":\"100\",\"evpn_vni\":\"16777216\"}"
