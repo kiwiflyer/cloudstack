@@ -446,6 +446,17 @@ do_evpn() {
         [ "${DRY_RUN}" -eq 1 ] || ok "vxlan device ${EVPN_VXLAN_DEV} created on udp/${EVPN_VXLAN_PORT}"
     fi
 
+    # The VLAN-to-VNI mappings the reconciler adds are rejected outright --
+    # "Invalid argument", with nothing to say why -- unless the bridge port has
+    # vlan_tunnel on. Set it every run: it is cheap, idempotent, and a host that
+    # predates this line would otherwise fail one VNI at a time.
+    if bridge -d link show dev "${EVPN_VXLAN_DEV}" 2>/dev/null | grep -q "vlan_tunnel on"; then
+        ok "vlan_tunnel already on for ${EVPN_VXLAN_DEV}"
+    else
+        run bridge link set dev "${EVPN_VXLAN_DEV}" vlan_tunnel on || true
+        [ "${DRY_RUN}" -eq 1 ] || ok "vlan_tunnel enabled for ${EVPN_VXLAN_DEV}"
+    fi
+
     head2 "FRR"
     if command -v vtysh >/dev/null 2>&1; then
         ok "vtysh present ($(vtysh -c 'show version' 2>/dev/null | head -1 | cut -c1-40))"

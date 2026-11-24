@@ -477,10 +477,10 @@ Each call carries the whole desired state. Rows are tagged
 `external_ids:cs-evpn-vpc-id`, so re-running `config-evpn-vpc` with a different VNI
 prunes the switch and anchor port the previous VNI left behind.
 
-**What this does not include.** The per-host EVPN reconciler — which creates the
-per-VNI VLANs, SVIs and dummy devices and writes FRR's per-VRF stanzas — is a
-separate component and is not in this PR. Without it the northbound state is
-correct and `northd` accepts it, but nothing advertises yet.
+**What this does not include.** Only ergonomics: an `evpnvni` parameter on
+`createNetwork`/`createVPC`, a typed field in `listNetworks`, and
+`EvpnL2`/`EvpnL3` offering capabilities all need core CloudStack changes.
+Nothing functional does — allocation and the host side are both below.
 
 **VNI allocation needs no CloudStack change.** The extension framework already
 persists whatever `ensure-network-device` prints — per network in
@@ -501,10 +501,62 @@ A VNI already in the stored details always wins, so widening or moving a range
 later never renumbers a network that is already up. An explicit `evpn_vni` in the
 payload overrides both, which is how an admin pins one.
 
-What has no extension-side equivalent is only ergonomics: an `evpnvni` parameter
-on `createNetwork`/`createVPC`, a typed field in `listNetworks`, and
-`EvpnL2`/`EvpnL3` offering capabilities. Those need core changes; nothing
-functional does.
+### 8c. The host side: `ovn-evpn-reconciler`
+
+OVN 26.09 creates the VRF, and only for a router port carrying
+`dynamic-routing-maintain-vrf`. Everything else the options above *name* has to
+exist on the host before OVN will use it. `ovn-evpn-reconciler` makes it exist.
+
+It reads the desired state from the OVN **southbound** database — `ovn-northd`
+republishes each EVPN switch's VNI and interface names into
+`Datapath_Binding.external_ids`, and a router's VRF id alongside — so it needs no
+CloudStack-specific tags of its own. It reads the actual state from the kernel and
+from FRR, and applies the difference.
+
+| It creates | For |
+| --- | --- |
+| a VLAN on the shared bridge, mapped to the VNI on the shared VXLAN device | every VNI |
+| the VLAN interface named by `dynamic-routing-bridge-ifname` | every VNI |
+| the dummy device named by `dynamic-routing-advertise-ifname` | `fdb` advertisement |
+| that interface moved into the VRF, carrying the anchor port's MAC | L3 VNIs |
+| `vrf csvrf-<vni>` and `router bgp <asn> vrf csvrf-<vni>` in FRR | L3 VNIs |
+
+```bash
+ovn-evpn-reconciler --status                 # what is wanted, and what is missing
+ovn-evpn-reconciler --once --dry-run         # the plan, changing nothing
+ovn-evpn-reconciler --asn 65001              # run as a daemon
+```
+
+It is a reconciler, not an event handler: a full pass runs at start and on every
+interval, so a missed event, a restart or a hand-edit converges rather than
+drifting. A converged host makes **zero** changes per pass, which is what makes the
+change count in the logs worth reading.
+
+**It waits rather than half-configuring.** An L3 VNI is not touched until both the
+anchor port's MAC and the VRF exist — the same wait Neutron's agent makes. An SVI
+with the wrong address, or a BGP stanza for a VRF that is not there, is worse than
+waiting one interval.
+
+**It owns only what it names:** interfaces matching `cse-*` and VRFs and FRR
+stanzas matching `csvrf-*`. An `ovn-bgp-agent` running beside it during migration
+is left alone, which is what makes a per-network migration possible.
+
+Dependencies are `python3`, `iproute2` and `ovn-sbctl`, plus `vtysh` for the FRR
+half. The design named `pyroute2`; this uses iproute2's JSON output instead, so it
+installs on any host already running OVS and OVN with nothing from pip. The
+netlink-event half of pyroute2 bought little, because the periodic full pass is
+required either way.
+
+Running it under systemd is left to host provisioning rather than shipped here,
+since the unit's user, restart policy and ordering are a packaging decision:
+
+```ini
+[Unit]
+After=ovn-controller.service frr.service
+[Service]
+ExecStart=/etc/cloudstack/extensions/OVN/ovn-evpn-reconciler --asn 65001
+Restart=always
+```
 
 **Device naming.** Linux caps an interface name at 15 characters and `ovn-northd`
 drops longer ones, so the names are built to fit the widest legal VNI:

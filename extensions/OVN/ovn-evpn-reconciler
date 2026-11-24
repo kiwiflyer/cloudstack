@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# ---------------------------------------------------------------------------
+# ovn-evpn-reconciler -- the host side of native OVN EVPN.
+#
+# OVN 26.09 drives EVPN itself, but it creates only the VRF, and only for a
+# router port carrying dynamic-routing-maintain-vrf. Everything else on the
+# host -- the per-VNI VLAN on the shared bridge, the VNI mapping on the shared
+# VXLAN device, the interfaces a logical switch's *-ifname options name, the SVI
+# that carries the router MAC inside the VRF, and FRR's per-VRF stanzas -- has
+# to exist before OVN will use it. This daemon makes them exist.
+#
+# It is a reconciler, not an event handler: it reads the desired state from the
+# OVN southbound database, reads the actual state from the kernel and FRR, and
+# applies the difference. A full pass runs at start and on every interval, so a
+# missed event, a restart or a hand-edit converges instead of drifting. That is
+# also the mitigation the design calls for against reconciler/FRR drift.
+#
+# It owns only what it names: VLAN interfaces matching cse-*, dummy devices
+# matching cse-ad-*, and VRFs and FRR stanzas matching csvrf-*. Anything else on
+# the host, including an ovn-bgp-agent running beside it during migration, is
+# left alone.
+#
+# Dependencies: python3, iproute2 (ip and bridge, both with -j), ovn-sbctl, and
+# vtysh for the FRR half. The design named pyroute2; this uses iproute2's JSON
+# output instead, so the daemon installs on any host that already runs OVS and
+# OVN with nothing from pip. The netlink-event half of pyroute2 bought little
+# here, because the periodic full pass is required regardless.
+# ---------------------------------------------------------------------------
+
+import argparse
+import json
+import logging
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+LOG = logging.getLogger("ovn-evpn-reconciler")
+
+# Names this daemon owns. Anything not matching these is somebody else's.
+IFACE_PREFIX = "cse-"
+BRIDGE_IF_RE = re.compile(r"^cse-br-(\d+)$")
+ADVERTISE_IF_RE = re.compile(r"^cse-ad-(\d+)$")
+VRF_RE = re.compile(r"^csvrf-(\d+)$")
+
+# Linux reserves 252-255; a 24-bit VNI never reaches them, but the VRF table id
+# is taken straight from the VNI, so the guard is kept where it is cheap.
+RESERVED_TABLE_IDS = {252, 253, 254, 255}
+
+VLAN_MIN = 2        # 1 is the bridge default PVID
+VLAN_MAX = 4094
+
+
+class CommandError(Exception):
+    pass
+
+
+class Runner:
+    """Subprocess wrapper that honours --dry-run and logs every change."""
+
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        self.changes = 0
+
+    def read(self, args):
+        """Run a read-only command; always executed, even under --dry-run."""
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CommandError("%s: %s" % (" ".join(args), exc))
+        if out.returncode != 0:
+            raise CommandError("%s: %s" % (" ".join(args), out.stderr.strip()))
+        return out.stdout
+
+    def read_json(self, args, default):
+        try:
+            return json.loads(self.read(args) or "null") or default
+        except (CommandError, ValueError) as exc:
+            LOG.debug("read_json %s: %s", " ".join(args), exc)
+            return default
+
+    def change(self, args, ignore_fail=False):
+        """Run a command that mutates the host."""
+        if self.dry_run:
+            LOG.info("would run: %s", " ".join(args))
+            self.changes += 1
+            return True
+        LOG.info("running: %s", " ".join(args))
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            if ignore_fail:
+                LOG.debug("ignored failure: %s", exc)
+                return False
+            LOG.error("%s: %s", " ".join(args), exc)
+            return False
+        if out.returncode != 0:
+            msg = out.stderr.strip() or out.stdout.strip()
+            if ignore_fail:
+                LOG.debug("ignored failure: %s", msg)
+                return False
+            LOG.error("%s: %s", " ".join(args), msg)
+            return False
+        self.changes += 1
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Desired state, read from the OVN southbound database
+#
+# ovn-northd republishes a logical switch's VNI, redistribution value and the
+# three interface names into Datapath_Binding.external_ids, and a router's VRF
+# id alongside. That is the whole reason this daemon needs no CloudStack tags of
+# its own: the southbound database already says what each VNI needs.
+# ---------------------------------------------------------------------------
+
+def ovsdb_map(value):
+    """OVSDB renders a map as ["map", [[k, v], ...]] in JSON output."""
+    if isinstance(value, list) and len(value) == 2 and value[0] == "map":
+        return {k: v for k, v in value[1]}
+    return {}
+
+
+def ovsdb_rows(runner, db, table, columns):
+    args = ["ovn-sbctl", "--format=json", "--columns=" + ",".join(columns),
+            "list", table]
+    if db:
+        args.insert(1, "--db=" + db)
+    blob = runner.read_json(args, {})
+    headings = blob.get("headings") or []
+    rows = []
+    for raw in blob.get("data") or []:
+        rows.append(dict(zip(headings, raw)))
+    return rows
+
+
+class Desired:
+    """One VNI's worth of what the host must provide."""
+
+    def __init__(self, vni, kind, name):
+        self.vni = vni
+        self.kind = kind            # "l2" or "l3"
+        self.name = name
+        self.bridge_if = None
+        self.vxlan_if = None
+        self.advertise_if = None
+        self.router_mac = None      # l3 only; the SVI's address
+        self.vrf = None             # l3 only
+
+    def __repr__(self):
+        return "<vni %d %s %s>" % (self.vni, self.kind, self.name)
+
+
+def read_desired(runner, db):
+    """Build the desired per-VNI state from the southbound database."""
+    desired = {}
+
+    for row in ovsdb_rows(runner, db, "Datapath_Binding", ["external_ids"]):
+        ids = ovsdb_map(row.get("external_ids"))
+        raw_vni = ids.get("dynamic-routing-vni")
+        if not raw_vni:
+            continue
+        try:
+            vni = int(raw_vni)
+        except (TypeError, ValueError):
+            LOG.warning("datapath %s has a non-numeric VNI %r; skipping",
+                        ids.get("name"), raw_vni)
+            continue
+        name = ids.get("name") or ids.get("logical-switch") or str(vni)
+        # A per-VPC EVPN switch is the Type-5 anchor; anything else with a VNI
+        # is a tenant L2 segment.
+        kind = "l3" if name.startswith("cs-evpn-") else "l2"
+        d = Desired(vni, kind, name)
+        d.bridge_if = ids.get("dynamic-routing-bridge-ifname")
+        d.vxlan_if = ids.get("dynamic-routing-vxlan-ifname")
+        d.advertise_if = ids.get("dynamic-routing-advertise-ifname")
+        desired[vni] = d
+
+    # A router datapath carries the VRF id, which names the VRF OVN creates.
+    vrf_ids = set()
+    for row in ovsdb_rows(runner, db, "Datapath_Binding", ["external_ids"]):
+        ids = ovsdb_map(row.get("external_ids"))
+        raw = ids.get("dynamic-routing-vrf-id")
+        if raw:
+            try:
+                vrf_ids.add(int(raw))
+            except (TypeError, ValueError):
+                pass
+    for vni in vrf_ids:
+        if vni in desired:
+            desired[vni].kind = "l3"
+            desired[vni].vrf = "csvrf-%d" % vni
+
+    # The SVI inside the VRF carries the anchor router port's MAC. Without it
+    # there is nothing to advertise from, so an L3 VNI is not ready until the
+    # Port_Binding exists -- the same wait Neutron's agent makes.
+    for row in ovsdb_rows(runner, db, "Port_Binding", ["logical_port", "mac"]):
+        port = row.get("logical_port") or ""
+        m = re.match(r"^cs-lrp-evpn-(\d+)$", port)
+        if not m:
+            continue
+        vni = int(m.group(1))
+        macs = row.get("mac")
+        if isinstance(macs, list) and len(macs) == 2 and macs[0] == "set":
+            macs = macs[1]
+        if isinstance(macs, str):
+            macs = [macs]
+        for entry in macs or []:
+            first = str(entry).split()[0]
+            if re.match(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", first):
+                if vni in desired:
+                    desired[vni].router_mac = first
+                    desired[vni].vrf = desired[vni].vrf or "csvrf-%d" % vni
+                break
+
+    return desired
+
+
+# ---------------------------------------------------------------------------
+# Actual state, read from the kernel
+# ---------------------------------------------------------------------------
+
+class Kernel:
+    def __init__(self, runner, bridge, vxlan_dev):
+        self.runner = runner
+        self.bridge = bridge
+        self.vxlan_dev = vxlan_dev
+        self.links = {}
+        self.vlan_to_vni = {}
+        self.vni_to_vlan = {}
+        self.vrfs = {}
+
+    def refresh(self):
+        self.links = {}
+        for link in self.runner.read_json(["ip", "-j", "link", "show"], []):
+            name = link.get("ifname")
+            if name:
+                self.links[name] = link
+
+        # The kernel is the only store of the VLAN-to-VNI mapping, so it is also
+        # where the allocation lives. Nothing is persisted to disk.
+        self.vlan_to_vni = {}
+        self.vni_to_vlan = {}
+        tunnels = self.runner.read_json(
+            ["bridge", "-j", "vlan", "tunnelshow", "dev", self.vxlan_dev], [])
+        for entry in tunnels:
+            # iproute2 calls this "tunnels"; older builds used "tunnel".
+            for tun in (entry.get("tunnels") or entry.get("tunnel") or []):
+                vlan, vni = tun.get("vlan"), tun.get("tunid")
+                if vlan is None or vni is None:
+                    continue
+                # ranges come back as vlan/vlanEnd with tunid/tunidEnd
+                vlan_end = tun.get("vlanEnd", vlan)
+                vni_end = tun.get("tunidEnd", vni)
+                span = min(vlan_end - vlan, vni_end - vni)
+                for off in range(span + 1):
+                    self.vlan_to_vni[vlan + off] = vni + off
+                    self.vni_to_vlan[vni + off] = vlan + off
+
+        self.vrfs = {}
+        for name, link in self.links.items():
+            info = (link.get("linkinfo") or {})
+            if info.get("info_kind") == "vrf":
+                table = (info.get("info_data") or {}).get("table")
+                self.vrfs[name] = table
+
+    def has(self, ifname):
+        return ifname in self.links
+
+    def is_up(self, ifname):
+        link = self.links.get(ifname) or {}
+        return "UP" in (link.get("flags") or [])
+
+    def master_of(self, ifname):
+        return (self.links.get(ifname) or {}).get("master")
+
+    def mac_of(self, ifname):
+        return (self.links.get(ifname) or {}).get("address")
+
+    def bring_up(self, runner, ifname):
+        """Only when it is actually down: a converged pass must make no changes,
+        or the change count stops meaning anything in the logs."""
+        if self.is_up(ifname):
+            return
+        runner.change(["ip", "link", "set", ifname, "up"], ignore_fail=True)
+
+    def free_vlan(self):
+        used = set(self.vlan_to_vni)
+        for vlan in range(VLAN_MIN, VLAN_MAX + 1):
+            if vlan not in used:
+                return vlan
+        return None
+
+
+# ---------------------------------------------------------------------------
+# FRR
+# ---------------------------------------------------------------------------
+
+class Frr:
+    """Per-VRF stanzas only. The base configuration belongs to provisioning."""
+
+    def __init__(self, runner, asn, enabled=True):
+        self.runner = runner
+        self.asn = asn
+        self.enabled = enabled and bool(shutil.which("vtysh"))
+
+    def available(self):
+        return self.enabled
+
+    def configured_vrfs(self):
+        if not self.available():
+            return set()
+        try:
+            out = self.runner.read(["vtysh", "-c", "show running-config"])
+        except CommandError as exc:
+            LOG.warning("could not read FRR configuration: %s", exc)
+            return set()
+        return set(VRF_RE.match(line.split()[1]).group(0)
+                   for line in out.splitlines()
+                   if line.startswith("vrf ") and len(line.split()) > 1
+                   and VRF_RE.match(line.split()[1]))
+
+    def stanza(self, vrf, vni):
+        """The configuration a VRF needs to advertise its prefixes as Type-5."""
+        return [
+            "vrf %s" % vrf,
+            " vni %d" % vni,
+            " exit-vrf",
+            "router bgp %s vrf %s" % (self.asn, vrf),
+            " address-family ipv4 unicast",
+            "  redistribute kernel",
+            "  redistribute connected",
+            " exit-address-family",
+            " address-family l2vpn evpn",
+            "  advertise ipv4 unicast",
+            " exit-address-family",
+            "exit",
+        ]
+
+    def apply(self, vrf, vni):
+        lines = self.stanza(vrf, vni)
+        if not self.available():
+            LOG.warning("vtysh not available; FRR stanza for %s not written:\n%s",
+                        vrf, "\n".join(lines))
+            return False
+        args = ["vtysh", "-c", "configure terminal"]
+        for line in lines:
+            args += ["-c", line]
+        ok = self.runner.change(args)
+        if ok:
+            self.runner.change(["vtysh", "-c", "write memory"], ignore_fail=True)
+        return ok
+
+    def remove(self, vrf):
+        if not self.available():
+            LOG.warning("vtysh not available; FRR stanza for %s not removed", vrf)
+            return False
+        args = ["vtysh", "-c", "configure terminal",
+                "-c", "no router bgp %s vrf %s" % (self.asn, vrf),
+                "-c", "no vrf %s" % vrf]
+        ok = self.runner.change(args, ignore_fail=True)
+        self.runner.change(["vtysh", "-c", "write memory"], ignore_fail=True)
+        return ok
+
+
+# ---------------------------------------------------------------------------
+# The reconciler
+# ---------------------------------------------------------------------------
+
+class Reconciler:
+    def __init__(self, runner, args):
+        self.runner = runner
+        self.bridge = args.bridge
+        self.vxlan_dev = args.vxlan_dev
+        self.db = args.sb_db
+        self.kernel = Kernel(runner, self.bridge, self.vxlan_dev)
+        self.frr = Frr(runner, args.asn, enabled=not args.no_frr)
+        self.manage_vrf = args.manage_vrf
+
+    def vlan_tunnel_on(self):
+        rows = self.runner.read_json(
+            ["bridge", "-j", "-d", "link", "show", "dev", self.vxlan_dev], [])
+        return bool(rows) and bool(rows[0].get("vlan_tunnel"))
+
+    def preflight(self):
+        self.kernel.refresh()
+        missing = [d for d in (self.bridge, self.vxlan_dev) if not self.kernel.has(d)]
+        if missing:
+            LOG.error("missing shared device(s): %s. Run "
+                      "'ovn-host-setup.sh --evpn' on this host first.",
+                      ", ".join(missing))
+            return False
+        # Without vlan_tunnel on the bridge port, the kernel rejects every
+        # VLAN-to-VNI mapping with a bare "Invalid argument". Host setup sets
+        # it; enabling it here too means a host provisioned before that still
+        # converges instead of failing once per VNI, forever.
+        if not self.vlan_tunnel_on():
+            LOG.info("%s has vlan_tunnel off; enabling it, because VLAN-to-VNI "
+                     "mapping is rejected without it", self.vxlan_dev)
+            self.runner.change(
+                ["bridge", "link", "set", "dev", self.vxlan_dev, "vlan_tunnel", "on"])
+        return True
+
+    # -- per-VNI convergence ------------------------------------------------
+
+    def ensure_vlan(self, vni):
+        """Map a VLAN to this VNI on the shared bridge and VXLAN device."""
+        vlan = self.kernel.vni_to_vlan.get(vni)
+        if vlan is not None:
+            return vlan
+        vlan = self.kernel.free_vlan()
+        if vlan is None:
+            LOG.error("no free VLAN left on %s for VNI %d; shard the bridge "
+                      "(one bridge carries %d VNIs)", self.bridge, vni, VLAN_MAX - VLAN_MIN + 1)
+            return None
+        okv = self.runner.change(
+            ["bridge", "vlan", "add", "dev", self.vxlan_dev, "vid", str(vlan)])  # idempotent in the kernel
+        okt = self.runner.change(
+            ["bridge", "vlan", "add", "dev", self.vxlan_dev, "vid", str(vlan),
+             "tunnel_info", "id", str(vni)])
+        okb = self.runner.change(
+            ["bridge", "vlan", "add", "dev", self.bridge, "vid", str(vlan), "self"],
+            ignore_fail=True)
+        if not (okv and okt):
+            return None
+        LOG.info("vni %d mapped to vlan %d on %s", vni, vlan, self.vxlan_dev)
+        if not self.runner.dry_run:
+            self.kernel.vni_to_vlan[vni] = vlan
+            self.kernel.vlan_to_vni[vlan] = vni
+        return vlan
+
+    def ensure_bridge_iface(self, name, vlan, mac=None, vrf=None):
+        """The VLAN interface a logical switch's bridge-ifname names."""
+        if not self.kernel.has(name):
+            if not self.runner.change(
+                    ["ip", "link", "add", "link", self.bridge, "name", name,
+                     "type", "vlan", "id", str(vlan)]):
+                return False
+        if mac and self.kernel.mac_of(name) != mac:
+            self.runner.change(["ip", "link", "set", name, "address", mac],
+                               ignore_fail=True)
+        if vrf and self.kernel.master_of(name) != vrf:
+            self.runner.change(["ip", "link", "set", name, "master", vrf],
+                               ignore_fail=True)
+        self.kernel.bring_up(self.runner, name)
+        return True
+
+    def ensure_dummy(self, name):
+        """The per-VNI device fdb advertisement needs."""
+        if not self.kernel.has(name):
+            if not self.runner.change(["ip", "link", "add", name, "type", "dummy"]):
+                return False
+        self.kernel.bring_up(self.runner, name)
+        return True
+
+    def ensure_vrf(self, vrf, table_id):
+        """OVN normally creates this; we only fill the gap when asked to."""
+        if self.kernel.has(vrf):
+            return True
+        if not self.manage_vrf:
+            return False
+        if table_id in RESERVED_TABLE_IDS:
+            LOG.error("refusing to create %s: table %d is reserved by Linux",
+                      vrf, table_id)
+            return False
+        if not self.runner.change(
+                ["ip", "link", "add", vrf, "type", "vrf", "table", str(table_id)]):
+            return False
+        self.runner.change(["ip", "link", "set", vrf, "up"], ignore_fail=True)
+        self.kernel.refresh()
+        return self.kernel.has(vrf)
+
+    def converge_l2(self, d):
+        vlan = self.ensure_vlan(d.vni)
+        if vlan is None:
+            return False
+        ok = True
+        if d.bridge_if:
+            ok = self.ensure_bridge_iface(d.bridge_if, vlan) and ok
+        if d.advertise_if:
+            ok = self.ensure_dummy(d.advertise_if) and ok
+        return ok
+
+    def converge_l3(self, d):
+        # Neutron's agent waits for both the router MAC and the VRF before it
+        # advertises anything, and so does this: an SVI with the wrong address,
+        # or a BGP stanza for a VRF that does not exist yet, is worse than
+        # waiting one interval.
+        if not d.router_mac:
+            LOG.info("vni %d: waiting for the anchor port MAC before advertising", d.vni)
+            return False
+        vrf = d.vrf or "csvrf-%d" % d.vni
+        if not self.kernel.has(vrf):
+            if not self.ensure_vrf(vrf, d.vni):
+                LOG.info("vni %d: waiting for OVN to create %s", d.vni, vrf)
+                return False
+
+        vlan = self.ensure_vlan(d.vni)
+        if vlan is None:
+            return False
+        ok = True
+        if d.bridge_if:
+            ok = self.ensure_bridge_iface(d.bridge_if, vlan,
+                                          mac=d.router_mac, vrf=vrf) and ok
+        if d.advertise_if:
+            ok = self.ensure_dummy(d.advertise_if) and ok
+        if ok:
+            self.frr.apply(vrf, d.vni)
+        return ok
+
+    # -- removing what is no longer wanted ----------------------------------
+
+    def prune(self, desired):
+        wanted_ifaces = set()
+        wanted_vrfs = set()
+        for d in desired.values():
+            for name in (d.bridge_if, d.advertise_if):
+                if name:
+                    wanted_ifaces.add(name)
+            if d.kind == "l3":
+                wanted_vrfs.add(d.vrf or "csvrf-%d" % d.vni)
+
+        for name in sorted(self.kernel.links):
+            if not name.startswith(IFACE_PREFIX):
+                continue
+            if name in wanted_ifaces:
+                continue
+            LOG.info("removing %s: no EVPN switch asks for it any more", name)
+            self.runner.change(["ip", "link", "del", name], ignore_fail=True)
+
+        wanted_vnis = set(desired)
+        for vlan, vni in sorted(self.kernel.vlan_to_vni.items()):
+            if vni in wanted_vnis:
+                continue
+            LOG.info("unmapping vlan %d from retired vni %d", vlan, vni)
+            self.runner.change(
+                ["bridge", "vlan", "del", "dev", self.vxlan_dev, "vid", str(vlan),
+                 "tunnel_info", "id", str(vni)], ignore_fail=True)
+            self.runner.change(
+                ["bridge", "vlan", "del", "dev", self.vxlan_dev, "vid", str(vlan)],
+                ignore_fail=True)
+
+        # FRR stanzas we wrote and no longer want. Only csvrf- names.
+        for vrf in sorted(self.frr.configured_vrfs()):
+            if vrf in wanted_vrfs:
+                continue
+            LOG.info("removing FRR stanza for retired %s", vrf)
+            self.frr.remove(vrf)
+
+        # A VRF OVN made is OVN's to remove; one we made is ours.
+        if self.manage_vrf:
+            for vrf in sorted(self.kernel.vrfs):
+                if VRF_RE.match(vrf) and vrf not in wanted_vrfs:
+                    LOG.info("removing %s", vrf)
+                    self.runner.change(["ip", "link", "del", vrf], ignore_fail=True)
+
+    # -- one pass -----------------------------------------------------------
+
+    def pass_once(self):
+        self.kernel.refresh()
+        try:
+            desired = read_desired(self.runner, self.db)
+        except CommandError as exc:
+            LOG.error("could not read the southbound database: %s", exc)
+            return False
+        LOG.debug("desired: %s", sorted(desired.values(), key=lambda d: d.vni))
+
+        ready, waiting = 0, 0
+        for vni in sorted(desired):
+            d = desired[vni]
+            done = self.converge_l2(d) if d.kind == "l2" else self.converge_l3(d)
+            if done:
+                ready += 1
+            else:
+                waiting += 1
+            self.kernel.refresh()
+
+        self.prune(desired)
+        LOG.info("pass complete: %d vni(s) ready, %d waiting, %d change(s)",
+                 ready, waiting, self.runner.changes)
+        return waiting == 0
+
+    def status(self):
+        self.kernel.refresh()
+        desired = read_desired(self.runner, self.db)
+        print("shared bridge : %s (%s)" % (self.bridge,
+              "present" if self.kernel.has(self.bridge) else "MISSING"))
+        print("vxlan device  : %s (%s)" % (self.vxlan_dev,
+              "present" if self.kernel.has(self.vxlan_dev) else "MISSING"))
+        print("frr           : %s" % ("vtysh available" if self.frr.available()
+                                      else "vtysh NOT available"))
+        if not desired:
+            print("\nno EVPN VNIs in the southbound database")
+            return
+        print("\n%-10s %-5s %-6s %-17s %-17s %s" %
+              ("VNI", "KIND", "VLAN", "BRIDGE-IF", "ADVERTISE-IF", "VRF"))
+        for vni in sorted(desired):
+            d = desired[vni]
+            vlan = self.kernel.vni_to_vlan.get(vni)
+            def mark(name):
+                if not name:
+                    return "-"
+                return name if self.kernel.has(name) else name + "!"
+            print("%-10d %-5s %-6s %-17s %-17s %s" % (
+                vni, d.kind, vlan if vlan is not None else "-",
+                mark(d.bridge_if), mark(d.advertise_if),
+                mark(d.vrf) if d.kind == "l3" else "-"))
+        print("\n! = not present on this host yet")
+
+
+# ---------------------------------------------------------------------------
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="ovn-evpn-reconciler",
+        description="Create the host-side EVPN devices and FRR stanzas that "
+                    "OVN 26.09 leaves to the operator.")
+    p.add_argument("--sb-db", default=os.environ.get("OVN_SB_DB", ""),
+                   help="OVN southbound database (default: ovn-sbctl's own)")
+    p.add_argument("--bridge", default=os.environ.get("OVN_EVPN_BRIDGE", "br-evpn"),
+                   help="shared VLAN-aware bridge (default: br-evpn)")
+    p.add_argument("--vxlan-dev", default=os.environ.get("OVN_EVPN_VXLAN_DEV", "vxlan-evpn"),
+                   help="shared VXLAN device (default: vxlan-evpn)")
+    p.add_argument("--asn", default=os.environ.get("OVN_EVPN_ASN", ""),
+                   help="local BGP ASN, for the per-VRF FRR stanzas")
+    p.add_argument("--interval", type=float, default=10.0,
+                   help="seconds between passes (default: 10)")
+    p.add_argument("--once", action="store_true", help="run one pass and exit")
+    p.add_argument("--status", action="store_true", help="print state and exit")
+    p.add_argument("--dry-run", "-n", action="store_true",
+                   help="print what would change and change nothing")
+    p.add_argument("--no-frr", action="store_true",
+                   help="skip the FRR half (devices only)")
+    p.add_argument("--manage-vrf", action="store_true",
+                   help="create missing VRFs instead of waiting for OVN to")
+    p.add_argument("--verbose", "-v", action="store_true")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S")
+
+    for tool in ("ip", "bridge", "ovn-sbctl"):
+        if not shutil.which(tool):
+            LOG.error("%s not found; this daemon needs iproute2 and ovn-sbctl", tool)
+            return 2
+
+    if not args.asn and not args.no_frr and not args.status:
+        LOG.warning("no --asn given; FRR stanzas cannot be written. "
+                    "Pass --asn, or --no-frr to manage devices only.")
+
+    runner = Runner(dry_run=args.dry_run)
+    rec = Reconciler(runner, args)
+
+    if args.status:
+        rec.status()
+        return 0
+
+    if not rec.preflight():
+        return 1
+
+    if args.once:
+        return 0 if rec.pass_once() else 1
+
+    stopping = {"now": False}
+
+    def stop(_sig, _frame):
+        LOG.info("stopping")
+        stopping["now"] = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    LOG.info("reconciling every %ss (bridge=%s vxlan=%s)",
+             args.interval, args.bridge, args.vxlan_dev)
+    while not stopping["now"]:
+        try:
+            rec.pass_once()
+        except Exception:                      # a bad pass must not kill the daemon
+            LOG.exception("pass failed; retrying next interval")
+        slept = 0.0
+        while slept < args.interval and not stopping["now"]:
+            time.sleep(0.25)
+            slept += 0.25
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

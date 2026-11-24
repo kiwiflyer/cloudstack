@@ -27,6 +27,7 @@
 /etc/cloudstack/extensions/MaaS/maas.py
 /etc/cloudstack/extensions/OVN/ovn.sh
 /etc/cloudstack/extensions/OVN/ovn-host-setup.sh
+/etc/cloudstack/extensions/OVN/ovn-evpn-reconciler
 /etc/default/cloudstack-management
 /etc/security/limits.d/cloudstack-limits.conf
 /etc/sudoers.d/cloudstack
