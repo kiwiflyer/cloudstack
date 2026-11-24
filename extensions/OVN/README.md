@@ -444,6 +444,68 @@ address and netmask. OVN masks the host bits, so a match written as
 
 ## 8. EVPN
 
+Two modes, picked per physical network with `ovn_evpn_mode`:
+
+| Mode | Who drives EVPN | OVN needed |
+| --- | --- | --- |
+| `none` (default) | nobody | any |
+| `agent` | a companion `ovn-bgp-agent` reading `external_ids` tags | 24.03+ |
+| `native` | OVN itself, with FRR on each host | **26.09+** |
+
+A deployment that only set `ovn_evpn_enabled=true` keeps running `agent` mode;
+nothing changes for it.
+
+### 8a. Native mode (OVN 26.09+)
+
+OVN 26.09 drives EVPN itself: `ovn-controller` exchanges state with FRR through the
+kernel, and the CMS writes only northbound options. This script stays
+northbound-only — it writes those options and nothing else.
+
+Four commands, dispatched only when `ovn_evpn_mode=native`:
+
+| Command | What it writes |
+| --- | --- |
+| `config-evpn-network` | the tier or isolated network's L2 VNI, redistribution and the three interface names |
+| `set-evpn-advertise` | the tier's contribution to its VPC's VRF: `none`, `prefix` (`connected`) or `host` (`connected-as-host`) |
+| `config-evpn-vpc` | the router's VRF and L3 VNI, the per-VPC EVPN switch and its Type-5 anchor port, the gateway chassis, and `gateway_port` on the VPC's NAT rows |
+| `remove-evpn` | takes a network or a VPC back out of EVPN |
+
+Each call carries the whole desired state. Rows are tagged
+`external_ids:cs-evpn-vpc-id`, so re-running `config-evpn-vpc` with a different VNI
+prunes the switch and anchor port the previous VNI left behind.
+
+**What this does not include.** The per-host EVPN reconciler — which creates the
+per-VNI VLANs, SVIs and dummy devices and writes FRR's per-VRF stanzas — is a
+separate component and is not in this PR. Neither is the CloudStack-side VNI
+allocation (zone ranges, `evpnvni` on `createNetwork`/`createVPC`, offering
+capabilities). Without the reconciler the northbound state is correct and `northd`
+accepts it, but nothing advertises yet.
+
+**Device naming.** Linux caps an interface name at 15 characters and `ovn-northd`
+drops longer ones, so the names are built to fit the widest legal VNI:
+`cse-br-<vni>` and `cse-ad-<vni>` are 15 characters at a 24-bit VNI. The VXLAN
+device is shared and named by `ovn_evpn_vxlan_dev`.
+
+**One finding worth repeating.** The Type-5 examples in circulation set only
+`dynamic-routing-bridge-ifname` and `dynamic-routing-vxlan-ifname` on the per-VPC
+EVPN switch. 26.03 removed the defaults for all three, and northd 26.09 logs
+`Missing dynamic-routing-advertise-ifname for datapath` without the third. All three
+are set here. `dynamic-routing-arp-prefer-local` was removed in 26.09 and is never
+set.
+
+Host setup is `ovn-host-setup.sh --evpn`: the VTEP address, one shared
+VLAN-aware bridge and one shared kernel VXLAN device. It refuses UDP 4789 for the
+kernel device, because OVS terminates data-plane VXLAN there and two listeners on
+one port is a failure that looks like a fabric problem.
+
+```bash
+./ovn-host-setup.sh --role host --sb-db tcp:10.0.0.1:6642 \
+                    --evpn --evpn-local-ip 10.255.0.11
+./ovn-host-setup.sh --verify --evpn
+```
+
+### 8b. Agent mode (ovn-bgp-agent)
+
 Optional, off by default. OVN keeps using Geneve between chassis; EVPN is about
 exposing those networks into a physical BGP/EVPN fabric.
 
@@ -658,6 +720,25 @@ sequence` in a loop, and a controller stuck in `flow-restore-wait` claims nothin
 pieces OVN needs are all present and correct in the databases; what is missing is a
 backup chassis healthy enough to act on them. Proving failover end to end needs two
 real hosts.
+
+### Native EVPN
+
+```bash
+./test-with-ovn.sh --evpn      # needs OVN 26.09 or later; exits early otherwise
+```
+
+44 assertions against a real 26.09 northbound database: the L2 VNI and all three
+interface names on a tier switch, all three `evpnadvertise` values, the VPC's VRF
+and Type-5 anchor with its gateway chassis, `gateway_port` pinned on the NAT rows,
+stale-VNI pruning, six guards (VNI 0, over 24 bits, non-numeric, unknown advertise
+value, no target, and native commands refused in agent mode), and teardown that
+leaves the VPC router standing.
+
+Two of those assertions check that `ovn-northd` republishes the VNI and the VRF id
+into the southbound `Datapath_Binding`. That is what lets a host-side reconciler
+find EVPN state without any CloudStack-specific tags, so it is worth proving rather
+than assuming. Nothing here reaches a fabric: there is no BGP peer and no
+reconciler, so this is the northbound half only.
 
 ### Under concurrency
 

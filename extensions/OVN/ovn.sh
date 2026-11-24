@@ -1693,6 +1693,311 @@ cmd_unsupported() {
     emit_success
 }
 
+
+# ---------------------------------------------------------------------------
+# Native OVN EVPN (26.09 and later)
+#
+# OVN 26.09 drives EVPN itself: ovn-controller exchanges state with FRR through
+# the kernel, and the CMS only writes northbound options. That replaces the
+# ovn-bgp-agent tagging above, which stays for networks already built on it.
+# ovn_evpn_mode picks per physical network: none, agent or native.
+#
+# This script stays northbound-only. The kernel devices these options name --
+# the VLAN interface, the shared VXLAN device and the per-VNI dummy used for fdb
+# advertisement -- are created on each host by the EVPN reconciler, which also
+# writes FRR's per-VRF stanzas. 26.09 creates only the VRF, and only when a
+# router port carries dynamic-routing-maintain-vrf.
+#
+# Verified against the 26.09.0 ovn-nb.xml: every option below is documented
+# there, and dynamic-routing-arp-prefer-local is NOT -- it was removed in 26.09,
+# so nothing here sets it.
+# ---------------------------------------------------------------------------
+
+EVPN_MODE="$(printf '%s' "$(phys ovn_evpn_mode)" | tr '[:upper:]' '[:lower:]')"
+if [ -z "${EVPN_MODE}" ]; then
+    # Back-compatible default: a deployment that only set ovn_evpn_enabled is
+    # running agent mode and must keep running it.
+    if [ "${EVPN_ENABLED}" = "true" ]; then EVPN_MODE="agent"; else EVPN_MODE="none"; fi
+fi
+
+EVPN_BRIDGE="$(phys ovn_evpn_bridge)"
+[ -n "${EVPN_BRIDGE}" ] || EVPN_BRIDGE="br-evpn"
+
+EVPN_VXLAN_DEV="$(phys ovn_evpn_vxlan_dev)"
+[ -n "${EVPN_VXLAN_DEV}" ] || EVPN_VXLAN_DEV="vxlan-evpn"
+
+evpn_native() { [ "${EVPN_MODE}" = "native" ]; }
+
+# VNI 0 is never used, and a VNI is 24 bits.
+evpn_valid_vni() {
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 16777215 ] 2>/dev/null
+}
+
+# Kernel device names the reconciler is expected to create. Linux caps an
+# interface name at 15 characters and ovn-northd silently drops names longer
+# than that, so these are built to fit the widest legal VNI: 7 + 8 = 15.
+evpn_br_ifname() { printf 'cse-br-%s' "$1"; }
+evpn_ad_ifname() { printf 'cse-ad-%s' "$1"; }
+
+# Logical object names. These are OVN names, not kernel devices, so they are not
+# bound by the 15-character limit.
+evpn_ls_name()  { printf 'cs-evpn-%s' "$1"; }
+evpn_lrp_name() { printf 'cs-lrp-evpn-%s' "$1"; }
+evpn_lsp_name() { printf 'cs-lsp-evpn-%s' "$1"; }
+evpn_vrf_name() { printf 'csvrf-%s' "$1"; }
+
+evpn_require_native() {
+    evpn_native || emit_failure \
+        "${COMMAND} needs ovn_evpn_mode=native on the physical network (current: ${EVPN_MODE})"
+}
+
+# Copy the public distributed gateway port's chassis scheduling onto the EVPN
+# port. Type-5 forwarding is centralized, and keeping EVPN egress on the chassis
+# that already holds source NAT avoids a second hairpin.
+evpn_copy_gateway_chassis() {
+    local from="$1" to="$2" chassis prio gc gcname
+    # Gateway_Chassis rows are named <lrp>-<chassis>, so they are found by prefix.
+    for gc in $(nbctl --bare --columns=_uuid list Gateway_Chassis 2>/dev/null); do
+        gcname="$(nbctl --bare --columns=name list Gateway_Chassis "${gc}" 2>/dev/null)"
+        case "${gcname}" in
+            "${from}-"*)
+                chassis="$(nbctl --bare --columns=chassis_name list Gateway_Chassis "${gc}" 2>/dev/null)"
+                prio="$(nbctl --bare --columns=priority list Gateway_Chassis "${gc}" 2>/dev/null)"
+                [ -n "${chassis}" ] || continue
+                nbctl lrp-set-gateway-chassis "${to}" "${chassis}" "${prio:-100}" >/dev/null 2>&1 \
+                    || log "evpn: could not schedule ${to} on ${chassis}"
+                ;;
+        esac
+    done
+}
+
+# Pin every NAT row on this router to the public gateway port. A router with an
+# EVPN port has two gateway ports, and OVN otherwise infers the port from the
+# NAT's external IP -- which is fine until it is not, so the design makes it
+# explicit.
+evpn_pin_nat_gateway_port() {
+    local lr="$1" pub_lrp="$2" pub_uuid nat
+    pub_uuid="$(nbctl --bare --columns=_uuid find Logical_Router_Port "name=${pub_lrp}" 2>/dev/null | grep . | head -1)"
+    [ -n "${pub_uuid}" ] || { log "evpn: no public gateway port ${pub_lrp}; leaving NAT rows alone"; return 0; }
+    for nat in $(nbctl --bare --columns=nat list Logical_Router "${lr}" 2>/dev/null | tr -d '[]," ' | tr '\n' ' '); do
+        [ -n "${nat}" ] || continue
+        nbctl set NAT "${nat}" "gateway_port=${pub_uuid}" >/dev/null 2>&1 \
+            || log "evpn: could not pin NAT ${nat} to ${pub_lrp}"
+    done
+}
+
+# Remove EVPN switches this VPC owns whose VNI is no longer the desired one.
+# Each call carries the whole desired state, so anything else tagged for this
+# VPC is stale by definition.
+evpn_prune_vpc_switches() {
+    local vpc_id="$1" keep_vni="$2" uuid name vni
+    for uuid in $(nbctl --bare --columns=_uuid find Logical_Switch \
+                      "external_ids:cs-evpn-vpc-id=\"${vpc_id}\"" 2>/dev/null | grep .); do
+        name="$(nbctl --bare --columns=name list Logical_Switch "${uuid}" 2>/dev/null)"
+        vni="$(nbctl --bare --columns=other_config list Logical_Switch "${uuid}" 2>/dev/null \
+               | tr ',' '\n' | sed -n 's/.*dynamic-routing-vni="\{0,1\}\([0-9]*\).*/\1/p' | head -1)"
+        [ "${vni}" = "${keep_vni}" ] && continue
+        log "evpn: pruning stale EVPN switch ${name} (vni ${vni:-unknown}) for vpc ${vpc_id}"
+        nbctl --if-exists ls-del "${name}" >/dev/null 2>&1 || true
+        [ -n "${vni}" ] && nbctl --if-exists lrp-del "$(evpn_lrp_name "${vni}")" >/dev/null 2>&1 || true
+    done
+}
+
+# ---------------------------------------------------------------------------
+# config-evpn-network: give a tier or isolated network an L2 VNI
+# ---------------------------------------------------------------------------
+cmd_config_evpn_network() {
+    local network_id vni redistribute ls
+    require_arg network_id network_id
+    require_arg vni evpn_vni
+    evpn_require_native
+    evpn_valid_vni "${vni}" \
+        || emit_failure "evpn_vni '${vni}' is not a VNI: 1-16777215, and 0 is never used"
+
+    # fdb advertises local MACs as Type-2; ip adds MAC+IP for VIF and router
+    # ports; nat advertises distributed dnat_and_snat entries, which is how
+    # static NAT addresses reach the fabric. They are independent tokens.
+    redistribute="$(arg evpn_redistribute)"
+    [ -n "${redistribute}" ] || redistribute="fdb,ip"
+
+    ls="$(ls_name "${network_id}")"
+    log "evpn: network ${network_id} -> L2 vni ${vni} redistribute=${redistribute}"
+
+    nbctl_or_fail -- set Logical_Switch "${ls}" \
+        "other_config:dynamic-routing-vni=${vni}" \
+        "other_config:dynamic-routing-redistribute=${redistribute}" \
+        "other_config:dynamic-routing-bridge-ifname=$(evpn_br_ifname "${vni}")" \
+        "other_config:dynamic-routing-vxlan-ifname=${EVPN_VXLAN_DEV}" \
+        "other_config:dynamic-routing-advertise-ifname=$(evpn_ad_ifname "${vni}")" \
+        -- set Logical_Switch "${ls}" \
+        "external_ids:cs-evpn-mode=native" \
+        "external_ids:cs-evpn-vni=${vni}" >/dev/null
+
+    nbctl --wait=sb sync >/dev/null 2>&1 || log "warning: --wait=sb sync timed out"
+    emit_json "$(jq -nc --arg vni "${vni}" --arg ls "${ls}" \
+        '{status:"success", evpn_vni:$vni, logical_switch:$ls}')"
+}
+
+# ---------------------------------------------------------------------------
+# set-evpn-advertise: what a tier contributes to its VPC's VRF
+# ---------------------------------------------------------------------------
+cmd_set_evpn_advertise() {
+    local network_id advertise lrp value
+    require_arg network_id network_id
+    evpn_require_native
+
+    advertise="$(printf '%s' "$(arg evpn_advertise)" | tr '[:upper:]' '[:lower:]')"
+    [ -n "${advertise}" ] || advertise="none"
+    case "${advertise}" in
+        none)   value="" ;;
+        prefix) value="connected" ;;
+        host)   value="connected-as-host" ;;
+        *) emit_failure "evpn_advertise must be none, prefix or host (got '${advertise}')" ;;
+    esac
+
+    lrp="$(lrp_guest "${network_id}")"
+    log "evpn: tier ${network_id} advertise=${advertise} on ${lrp}"
+    if [ -z "${value}" ]; then
+        nbctl -- remove Logical_Router_Port "${lrp}" options dynamic-routing-redistribute \
+            >/dev/null 2>&1 || true
+    else
+        nbctl_or_fail -- set Logical_Router_Port "${lrp}" \
+            "options:dynamic-routing-redistribute=${value}" >/dev/null
+    fi
+    emit_success
+}
+
+# ---------------------------------------------------------------------------
+# config-evpn-vpc: give a VPC an L3 VNI, a VRF and a Type-5 anchor
+# ---------------------------------------------------------------------------
+cmd_config_evpn_vpc() {
+    local vpc_id vni lr ls lrp lsp mac redistribute pub_lrp
+    require_arg vpc_id vpc_id
+    require_arg vni evpn_l3_vni
+    evpn_require_native
+    evpn_valid_vni "${vni}" \
+        || emit_failure "evpn_l3_vni '${vni}' is not a VNI: 1-16777215, and 0 is never used"
+
+    lr="$(lr_name "")"
+    ls="$(evpn_ls_name "${vni}")"
+    lrp="$(evpn_lrp_name "${vni}")"
+    lsp="$(evpn_lsp_name "${vni}")"
+    pub_lrp="$(lrp_ext "")"
+    mac="$(_derived_mac 04 "${vpc_id}")"
+
+    # static carries VPC static routes into the VRF; nat carries the VPC's NAT
+    # addresses. Tier prefixes arrive per router port, through set-evpn-advertise.
+    redistribute="$(arg evpn_router_redistribute)"
+    [ -n "${redistribute}" ] || redistribute="static,nat"
+
+    log "evpn: vpc ${vpc_id} -> L3 vni ${vni} vrf $(evpn_vrf_name "${vni}") on ${lr}"
+    ensure_lr "" || emit_failure "failed to ensure the VPC router for ${vpc_id}"
+
+    evpn_prune_vpc_switches "${vpc_id}" "${vni}"
+
+    # The VRF id equals the L3 VNI, as Neutron does. Linux reserves 252-255, and
+    # a VNI never reaches those, so no extra guard is needed here.
+    nbctl_or_fail -- set Logical_Router "${lr}" \
+        "options:dynamic-routing=true" \
+        "options:dynamic-routing-vrf-id=${vni}" \
+        "options:dynamic-routing-vrf-name=$(evpn_vrf_name "${vni}")" \
+        "options:dynamic-routing-redistribute=${redistribute}" >/dev/null
+
+    if [ "$(arg evpn_no_learning)" = "true" ]; then
+        nbctl_or_fail -- set Logical_Router "${lr}" \
+            "options:dynamic-routing-no-learning=true" >/dev/null
+    else
+        nbctl -- remove Logical_Router "${lr}" options dynamic-routing-no-learning \
+            >/dev/null 2>&1 || true
+    fi
+
+    # All three *-ifname options are set here, including advertise-ifname, which
+    # the Type-5 examples tend to omit: 26.03 removed the defaults, and northd
+    # 26.09 logs "Missing dynamic-routing-advertise-ifname for datapath" for the
+    # EVPN switch without it.
+    #
+    # The EVPN switch, the router port that owns the VRF, and the patch between
+    # them, in one transaction: a half-built anchor would leave northd with a
+    # VNI and no port to hang it on.
+    nbctl_or_fail -- --may-exist ls-add "${ls}" \
+        -- set Logical_Switch "${ls}" \
+           "other_config:dynamic-routing-vni=${vni}" \
+           "other_config:dynamic-routing-bridge-ifname=$(evpn_br_ifname "${vni}")" \
+           "other_config:dynamic-routing-vxlan-ifname=${EVPN_VXLAN_DEV}" \
+           "other_config:dynamic-routing-advertise-ifname=$(evpn_ad_ifname "${vni}")" \
+           "external_ids:cs-evpn-mode=native" \
+           "external_ids:cs-evpn-vpc-id=${vpc_id}" \
+           "external_ids:cs-evpn-vni=${vni}" \
+        -- --may-exist lrp-add "${lr}" "${lrp}" "${mac}" \
+        -- set Logical_Router_Port "${lrp}" \
+           "options:dynamic-routing-maintain-vrf=true" \
+           "external_ids:cs-evpn-vpc-id=${vpc_id}" \
+        -- --may-exist lsp-add "${ls}" "${lsp}" \
+        -- lsp-set-type "${lsp}" router \
+        -- lsp-set-addresses "${lsp}" router \
+        -- lsp-set-options "${lsp}" "router-port=${lrp}" >/dev/null
+    warn_if_duplicated Logical_Switch "${ls}"
+
+    evpn_copy_gateway_chassis "${pub_lrp}" "${lrp}"
+    evpn_pin_nat_gateway_port "${lr}" "${pub_lrp}"
+
+    nbctl --wait=sb sync >/dev/null 2>&1 || log "warning: --wait=sb sync timed out"
+    emit_json "$(jq -nc --arg vni "${vni}" --arg lr "${lr}" --arg ls "${ls}" \
+        --arg vrf "$(evpn_vrf_name "${vni}")" \
+        '{status:"success", evpn_l3_vni:$vni, logical_router:$lr, evpn_switch:$ls, vrf:$vrf}')"
+}
+
+# ---------------------------------------------------------------------------
+# remove-evpn: take a network or a VPC back out of EVPN
+# ---------------------------------------------------------------------------
+cmd_remove_evpn() {
+    local network_id vpc_id ls lr vni uuid name
+    network_id="$(arg network_id)"
+    vpc_id="$(arg vpc_id)"
+    [ -n "${network_id}" ] || [ -n "${vpc_id}" ] \
+        || emit_failure "remove-evpn needs network_id or vpc_id"
+
+    if [ -n "${network_id}" ]; then
+        ls="$(ls_name "${network_id}")"
+        log "evpn: removing L2 EVPN options from ${ls}"
+        nbctl -- remove Logical_Switch "${ls}" other_config dynamic-routing-vni \
+              -- remove Logical_Switch "${ls}" other_config dynamic-routing-redistribute \
+              -- remove Logical_Switch "${ls}" other_config dynamic-routing-bridge-ifname \
+              -- remove Logical_Switch "${ls}" other_config dynamic-routing-vxlan-ifname \
+              -- remove Logical_Switch "${ls}" other_config dynamic-routing-advertise-ifname \
+              -- remove Logical_Switch "${ls}" external_ids cs-evpn-mode \
+              -- remove Logical_Switch "${ls}" external_ids cs-evpn-vni \
+              >/dev/null 2>&1 || log "evpn: nothing to remove on ${ls}"
+        nbctl -- remove Logical_Router_Port "$(lrp_guest "${network_id}")" \
+              options dynamic-routing-redistribute >/dev/null 2>&1 || true
+    fi
+
+    if [ -n "${vpc_id}" ]; then
+        lr="$(lr_name "")"
+        log "evpn: removing L3 EVPN from vpc ${vpc_id} (${lr})"
+        # Everything this VPC owns, whatever its VNI: the tag is the handle.
+        for uuid in $(nbctl --bare --columns=_uuid find Logical_Switch \
+                          "external_ids:cs-evpn-vpc-id=\"${vpc_id}\"" 2>/dev/null | grep .); do
+            name="$(nbctl --bare --columns=name list Logical_Switch "${uuid}" 2>/dev/null)"
+            [ -n "${name}" ] && nbctl --if-exists ls-del "${name}" >/dev/null 2>&1 || true
+        done
+        for uuid in $(nbctl --bare --columns=name find Logical_Router_Port \
+                          "external_ids:cs-evpn-vpc-id=\"${vpc_id}\"" 2>/dev/null | grep .); do
+            nbctl --if-exists lrp-del "${uuid}" >/dev/null 2>&1 || true
+        done
+        nbctl -- remove Logical_Router "${lr}" options dynamic-routing \
+              -- remove Logical_Router "${lr}" options dynamic-routing-vrf-id \
+              -- remove Logical_Router "${lr}" options dynamic-routing-vrf-name \
+              -- remove Logical_Router "${lr}" options dynamic-routing-redistribute \
+              -- remove Logical_Router "${lr}" options dynamic-routing-no-learning \
+              >/dev/null 2>&1 || log "evpn: nothing to remove on ${lr}"
+    fi
+
+    nbctl --wait=sb sync >/dev/null 2>&1 || true
+    emit_success
+}
+
 # ---------------------------------------------------------------------------
 # Dispatch
 #
@@ -1751,6 +2056,13 @@ case "${COMMAND}" in
     delete-private-gateway)    cmd_delete_private_gateway ;;
     apply-static-routes)       cmd_apply_static_routes ;;
     apply-private-gw-acl)      cmd_apply_private_gw_acl ;;
+
+    # Native OVN EVPN (26.09+). Only dispatched when the physical network sets
+    # ovn_evpn_mode=native; agent-mode networks keep the tagging path above.
+    config-evpn-network)       cmd_config_evpn_network ;;
+    config-evpn-vpc)           cmd_config_evpn_vpc ;;
+    set-evpn-advertise)        cmd_set_evpn_advertise ;;
+    remove-evpn)               cmd_remove_evpn ;;
 
     *)                     cmd_unsupported ;;
 esac

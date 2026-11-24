@@ -76,6 +76,12 @@ DRY_RUN=0
 VERIFY_ONLY=0
 FORCE=0
 RESTART_AGENT=0
+EVPN=0
+EVPN_LOCAL_IP=""
+EVPN_BRIDGE="br-evpn"
+EVPN_VXLAN_DEV="vxlan-evpn"
+EVPN_VXLAN_PORT="49152"
+EVPN_ASN=""
 
 RED=""; GREEN=""; YELLOW=""; RESET=""
 if [ -t 1 ]; then RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'; fi
@@ -111,6 +117,12 @@ while [ $# -gt 0 ]; do
         --agent-properties) AGENT_PROPERTIES="${2:?}"; shift 2 ;;
         --hosts)         HOSTS_FILE="${2:?}"; shift 2 ;;
         --ssh-user)      SSH_USER="${2:?}"; shift 2 ;;
+        --evpn)          EVPN=1; shift ;;
+        --evpn-local-ip) EVPN_LOCAL_IP="${2:?}"; EVPN=1; shift 2 ;;
+        --evpn-bridge)   EVPN_BRIDGE="${2:?}"; shift 2 ;;
+        --evpn-vxlan-dev)  EVPN_VXLAN_DEV="${2:?}"; shift 2 ;;
+        --evpn-vxlan-port) EVPN_VXLAN_PORT="${2:?}"; shift 2 ;;
+        --evpn-asn)      EVPN_ASN="${2:?}"; shift 2 ;;
         --restart-agent) RESTART_AGENT=1; shift ;;
         --dry-run|-n)    DRY_RUN=1; shift ;;
         --verify)        VERIFY_ONLY=1; shift ;;
@@ -348,12 +360,114 @@ do_host() {
     set_property "${AGENT_PROPERTIES}" "libvirt.vif.driver" \
         "com.cloud.hypervisor.kvm.resource.OvsVifDriver"
     set_property "${AGENT_PROPERTIES}" "network.bridge.type" "openvswitch"
+    [ "${EVPN}" -eq 1 ] && do_evpn
+
     if [ "${RESTART_AGENT}" -eq 1 ]; then
         service_restart_agent
     elif [ -f "${AGENT_PROPERTIES}" ]; then
         say "restart cloudstack-agent for the VIF driver change to take effect"
         say "  (re-run with --restart-agent to do that here; it disconnects the host briefly)"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Native OVN EVPN (26.09 and later)
+#
+# OVN creates only the VRF, and only for a router port that asks for one. The
+# shared pieces below are one-time host setup; the per-VNI VLANs, SVIs and FRR
+# VRF stanzas are the EVPN reconciler's job, because they come and go with
+# networks.
+#
+# The kernel VXLAN device must NOT sit on 4789: OVS terminates data-plane VXLAN
+# there, and two listeners on one port is the failure mode that looks like a
+# fabric problem for a day. Neutron uses 49152 and so does this.
+# ---------------------------------------------------------------------------
+
+ovn_version() {
+    local v
+    v="$(ovn-nbctl --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    printf '%s' "${v}"
+}
+
+# 26.09 or later, compared numerically on the YY.MM pair.
+ovn_supports_native_evpn() {
+    local v major minor
+    v="$(ovn_version)"
+    major="${v%%.*}"; minor="${v#*.}"; minor="${minor%%.*}"
+    case "${major}${minor}" in *[!0-9]*|'') return 1 ;; esac
+    [ "${major}" -gt 26 ] && return 0
+    [ "${major}" -eq 26 ] && [ "${minor}" -ge 9 ]
+}
+
+do_evpn() {
+    head2 "native EVPN"
+    need_root
+
+    if ovn_supports_native_evpn; then
+        ok "OVN $(ovn_version) supports native EVPN"
+    else
+        die "native EVPN needs OVN 26.09 or later; this host has $(ovn_version :-unknown).
+        Use the ovn-bgp-agent mode (ovn_evpn_mode=agent) on older releases."
+    fi
+
+    if [ -z "${EVPN_LOCAL_IP}" ]; then
+        EVPN_LOCAL_IP="$(derive_encap_ip || true)"
+        [ -n "${EVPN_LOCAL_IP}" ] && say "derived EVPN local ip ${EVPN_LOCAL_IP} from the route to the southbound db"
+    fi
+    [ -n "${EVPN_LOCAL_IP}" ] || die "could not determine the VTEP address; pass --evpn-local-ip (normally the host's fabric loopback)"
+
+    if [ "${EVPN_VXLAN_PORT}" = "4789" ] && [ "${FORCE}" -ne 1 ]; then
+        die "the kernel VXLAN device must not use 4789: OVS terminates data-plane VXLAN on it.
+        Neutron uses 49152. Pass --evpn-vxlan-port with another port, or --force if you
+        have genuinely moved OVS off 4789."
+    fi
+
+    ovs_set ovn-evpn-local-ip "${EVPN_LOCAL_IP}"
+    ovs_set ovn-evpn-vxlan-ports "4789"
+
+    # One VLAN-aware bridge and one VXLAN device, shared by every VNI. The
+    # reconciler maps a VLAN per VNI onto them rather than creating a device
+    # per VNI, which is what keeps this scaling past a handful of networks.
+    if ip link show "${EVPN_BRIDGE}" >/dev/null 2>&1; then
+        ok "bridge ${EVPN_BRIDGE} exists"
+    else
+        run ip link add "${EVPN_BRIDGE}" type bridge vlan_filtering 1 || die "could not create ${EVPN_BRIDGE}"
+        run ip link set "${EVPN_BRIDGE}" up || true
+        [ "${DRY_RUN}" -eq 1 ] || ok "bridge ${EVPN_BRIDGE} created (vlan_filtering on)"
+    fi
+
+    if ip link show "${EVPN_VXLAN_DEV}" >/dev/null 2>&1; then
+        ok "vxlan device ${EVPN_VXLAN_DEV} exists"
+    else
+        run ip link add "${EVPN_VXLAN_DEV}" type vxlan local "${EVPN_LOCAL_IP}" \
+            dstport "${EVPN_VXLAN_PORT}" nolearning external || die "could not create ${EVPN_VXLAN_DEV}"
+        run ip link set "${EVPN_VXLAN_DEV}" master "${EVPN_BRIDGE}" || true
+        run ip link set "${EVPN_VXLAN_DEV}" up || true
+        [ "${DRY_RUN}" -eq 1 ] || ok "vxlan device ${EVPN_VXLAN_DEV} created on udp/${EVPN_VXLAN_PORT}"
+    fi
+
+    head2 "FRR"
+    if command -v vtysh >/dev/null 2>&1; then
+        ok "vtysh present ($(vtysh -c 'show version' 2>/dev/null | head -1 | cut -c1-40))"
+    else
+        warn "vtysh not found; FRR 10 or later must be installed for native EVPN"
+    fi
+    cat <<NOTE
+
+  The base FRR configuration is host provisioning, not this script's to own.
+  It needs, once per host:
+
+      router bgp ${EVPN_ASN:-<asn>}
+       neighbor <underlay-peers> ...
+       address-family l2vpn evpn
+        advertise-all-vni
+        advertise-svi-ip
+       exit-address-family
+
+  Per-VRF stanzas (vrf csvrf-<vni> / router bgp <asn> vrf csvrf-<vni>) are
+  written by the EVPN reconciler as VPCs come and go. Do not write them here:
+  two writers on one FRR configuration is how it drifts.
+NOTE
 }
 
 service_restart_agent() {
@@ -465,6 +579,21 @@ do_verify() {
         fi
     else
         warn "cannot reach ovsdb-server"; fail=1
+    fi
+
+    if [ "${EVPN}" -eq 1 ]; then
+        ovn_supports_native_evpn && ok "OVN $(ovn_version) supports native EVPN" \
+            || { warn "OVN $(ovn_version) is older than 26.09; native EVPN unavailable"; fail=1; }
+        ip link show "${EVPN_BRIDGE}" >/dev/null 2>&1 && ok "bridge ${EVPN_BRIDGE} present" \
+            || { warn "bridge ${EVPN_BRIDGE} missing"; fail=1; }
+        ip link show "${EVPN_VXLAN_DEV}" >/dev/null 2>&1 && ok "vxlan device ${EVPN_VXLAN_DEV} present" \
+            || { warn "vxlan device ${EVPN_VXLAN_DEV} missing"; fail=1; }
+        if ip -d link show "${EVPN_VXLAN_DEV}" 2>/dev/null | grep -q "dstport 4789"; then
+            warn "${EVPN_VXLAN_DEV} is on udp/4789, which OVS also uses for VXLAN"; fail=1
+        else
+            ok "kernel VXLAN port does not collide with OVS"
+        fi
+        command -v vtysh >/dev/null 2>&1 && ok "vtysh present" || { warn "vtysh missing (FRR 10+ required)"; fail=1; }
     fi
 
     if pgrep -x ovn-controller >/dev/null 2>&1; then ok "ovn-controller running"

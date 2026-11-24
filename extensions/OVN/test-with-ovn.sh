@@ -113,6 +113,151 @@ expect_absent() {
 }
 
 # ---------------------------------------------------------------------------
+# --evpn: native OVN EVPN (26.09 and later)
+#
+# Needs a real 26.09 northbound database. The options this exercises did not all
+# exist before 26.09, and one of them -- dynamic-routing-arp-prefer-local -- was
+# removed in it, so running this against an older OVN proves nothing.
+#
+# Nothing here reaches a fabric: there is no BGP peer and no reconciler, so what
+# is asserted is the northbound state CloudStack is responsible for, plus
+# ovn-northd's acceptance of it. northd is the real judge -- it logs a warning
+# for an EVPN switch missing an interface name, which is how the omission of
+# advertise-ifname on the L3 switch was found.
+# ---------------------------------------------------------------------------
+
+EVPN_PHYS="$PHYS,\"ovn_evpn_mode\":\"native\""
+
+evpn_run() {   # evpn_run <label> <command> <payload> [phys-override]
+    STEP=$((STEP+1))
+    local label="$1" cmd="$2" payload="$3" phys="${4:-$EVPN_PHYS}"
+    printf '{"physical-network-extension-details":{%s},"network-extension-details":{},"payload":%s}' \
+        "$phys" "$payload" > /tmp/evpn.json
+    printf '\n[%02d] %s\n' "$STEP" "$label"
+    local out lines status
+    out="$($SCRIPT "$cmd" /tmp/evpn.json 30 2>&1)"
+    lines="$(printf '%s\n' "$out" | grep -c .)"
+    status="$(printf '%s' "$out" | jq -r '.status // "NOT-JSON"' 2>/dev/null)"
+    printf '      -> %s\n' "$out"
+    [ "$lines" = "1" ] || { bad "$label: expected 1 line, got $lines"; return 1; }
+    [ "$status" = "success" ] || { bad "$label: status=$status"; return 1; }
+    ok "$label"
+}
+
+# evpn_reject <label> <command> <payload> [phys] -- a guard that must refuse
+evpn_reject() {
+    STEP=$((STEP+1))
+    local label="$1" cmd="$2" payload="$3" phys="${4:-$EVPN_PHYS}"
+    printf '{"physical-network-extension-details":{%s},"network-extension-details":{},"payload":%s}' \
+        "$phys" "$payload" > /tmp/evpn.json
+    printf '\n[%02d] %s\n' "$STEP" "$label"
+    local out status
+    out="$($SCRIPT "$cmd" /tmp/evpn.json 20 2>&1)"
+    status="$(printf '%s' "$out" | jq -r '.status // "NOT-JSON"' 2>/dev/null)"
+    printf '      -> %s\n' "$out"
+    [ "$status" = "failure" ] && ok "$label" || bad "$label: expected a clean failure, got status=$status"
+}
+
+if [ "${1:-}" = "--evpn" ]; then
+    echo "=========================================================="
+    echo " NATIVE OVN EVPN"
+    echo "=========================================================="
+    OVNVER="$(ovn-nbctl --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    OVNMAJ="${OVNVER%%.*}"; OVNMIN="${OVNVER#*.}"; OVNMIN="${OVNMIN%%.*}"
+    echo "  ovn-nbctl ${OVNVER}"
+    if ! { [ "${OVNMAJ:-0}" -gt 26 ] 2>/dev/null || { [ "${OVNMAJ:-0}" -eq 26 ] && [ "${OVNMIN:-0}" -ge 9 ]; } 2>/dev/null; }; then
+        echo "  native EVPN needs OVN 26.09 or later; nothing to test here."
+        exit 0
+    fi
+
+    L2VNI=100100
+    L3VNI=200007
+    L3VNI2=200077
+
+    evpn_run "implement-vpc (host for the EVPN work)" implement-vpc \
+      "{\"vpc_id\":\"7\",\"vpc_cidr\":\"10.2.0.0/16\",\"public_ip\":\"192.0.2.10\",\"source_nat\":\"true\",\"public_vlan\":\"101\",\"public_gateway\":\"192.0.2.1\",\"public_cidr\":\"192.0.2.0/24\"}"
+    evpn_run "implement-network tier 100" implement-network \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"cidr\":\"10.2.1.0/24\",\"gateway\":\"10.2.1.1\",\"zone_id\":\"1\"}"
+
+    evpn_run "config-evpn-network (L2 VNI)" config-evpn-network \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"evpn_vni\":\"$L2VNI\"}"
+    expect_match "L2 VNI on the tier switch"      "dynamic-routing-vni=\"?$L2VNI" --bare --columns=other_config list Logical_Switch cs-net-100
+    expect_match "redistribute defaults to fdb,ip" "fdb,ip"                        --bare --columns=other_config list Logical_Switch cs-net-100
+    expect_match "bridge ifname set"               "cse-br-$L2VNI"                 --bare --columns=other_config list Logical_Switch cs-net-100
+    expect_match "vxlan ifname set"                "vxlan-evpn"                    --bare --columns=other_config list Logical_Switch cs-net-100
+    expect_match "advertise ifname set"            "cse-ad-$L2VNI"                 --bare --columns=other_config list Logical_Switch cs-net-100
+
+    evpn_run "set-evpn-advertise host" set-evpn-advertise \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"evpn_advertise\":\"host\"}"
+    expect_match "tier advertises connected-as-host" "connected-as-host" --bare --columns=options list Logical_Router_Port cs-lrp-100
+    evpn_run "set-evpn-advertise prefix" set-evpn-advertise \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"evpn_advertise\":\"prefix\"}"
+    expect_match "tier advertises connected" "connected" --bare --columns=options list Logical_Router_Port cs-lrp-100
+    evpn_run "set-evpn-advertise none" set-evpn-advertise \
+      "{\"network_id\":\"100\",\"vpc_id\":\"7\",\"evpn_advertise\":\"none\"}"
+    expect_absent "tier out of the VRF again" "dynamic-routing-redistribute" --bare --columns=options list Logical_Router_Port cs-lrp-100
+
+    evpn_run "config-evpn-vpc (L3 VNI, VRF, Type-5 anchor)" config-evpn-vpc \
+      "{\"vpc_id\":\"7\",\"evpn_l3_vni\":\"$L3VNI\"}"
+    expect_match "router dynamic routing on"   "dynamic-routing=\"?true"        --bare --columns=options list Logical_Router cs-vpc-rtr-7
+    expect_match "vrf id equals the L3 VNI"    "dynamic-routing-vrf-id=\"?$L3VNI" --bare --columns=options list Logical_Router cs-vpc-rtr-7
+    expect_match "vrf name is csvrf-<vni>"     "csvrf-$L3VNI"                    --bare --columns=options list Logical_Router cs-vpc-rtr-7
+    expect_match "router redistributes static+nat" "static,nat"                  --bare --columns=options list Logical_Router cs-vpc-rtr-7
+    expect_match "EVPN switch created"         "cs-evpn-$L3VNI"                  --bare --columns=name find Logical_Switch "name=cs-evpn-$L3VNI"
+    expect_match "EVPN switch advertise ifname" "cse-ad-$L3VNI"                  --bare --columns=other_config list Logical_Switch "cs-evpn-$L3VNI"
+    expect_match "router port owns the VRF"    "dynamic-routing-maintain-vrf"    --bare --columns=options list Logical_Router_Port "cs-lrp-evpn-$L3VNI"
+    expect_match "anchor LSP is a router port" "router"                          lsp-get-type "cs-lsp-evpn-$L3VNI"
+    expect_match "EVPN egress follows the gateway chassis" "chassis-a"           lrp-get-gateway-chassis "cs-lrp-evpn-$L3VNI"
+
+    # The design says northd republishes all of this into the southbound
+    # Datapath_Binding, which is what lets the reconciler work without any
+    # CloudStack-specific tags. Worth asserting rather than trusting.
+    $NB --wait=sb sync >/dev/null 2>&1
+    STEP=$((STEP+1)); printf '\n[%02d] %s\n' "$STEP" "southbound carries the EVPN state (no extra tags needed)"
+    SBOUT="$(ovn-sbctl --db="${OVN_SB_DB:-unix:/var/run/ovn/ovnsb_db.sock}" --bare --columns=external_ids list Datapath_Binding 2>/dev/null)"
+    printf '%s' "$SBOUT" | grep -q "dynamic-routing-vni=$L2VNI" \
+        && ok "L2 VNI visible in southbound Datapath_Binding" \
+        || bad "L2 VNI missing from southbound Datapath_Binding"
+    printf '%s' "$SBOUT" | grep -q "dynamic-routing-vrf-id=$L3VNI" \
+        && ok "VRF id visible in southbound Datapath_Binding" \
+        || bad "VRF id missing from southbound Datapath_Binding"
+
+    northd_clean "northd accepted the EVPN configuration" "\\|ERR\\|"
+    northd_clean "no EVPN interface name is missing" "Missing dynamic-routing-.*-ifname"
+
+    evpn_run "config-evpn-vpc again with a new VNI" config-evpn-vpc \
+      "{\"vpc_id\":\"7\",\"evpn_l3_vni\":\"$L3VNI2\"}"
+    expect_match  "new EVPN switch present" "cs-evpn-$L3VNI2" --bare --columns=name find Logical_Switch "name=cs-evpn-$L3VNI2"
+    expect_absent "stale EVPN switch pruned" "cs-evpn-$L3VNI"  --bare --columns=name find Logical_Switch "name=cs-evpn-$L3VNI"
+    expect_absent "stale anchor port pruned" "cs-lrp-evpn-$L3VNI" --bare --columns=name find Logical_Router_Port "name=cs-lrp-evpn-$L3VNI"
+
+    echo
+    echo "----- guards -----"
+    evpn_reject "VNI 0 refused"              config-evpn-network "{\"network_id\":\"100\",\"evpn_vni\":\"0\"}"
+    evpn_reject "VNI above 24 bits refused"  config-evpn-network "{\"network_id\":\"100\",\"evpn_vni\":\"16777216\"}"
+    evpn_reject "non-numeric VNI refused"    config-evpn-network "{\"network_id\":\"100\",\"evpn_vni\":\"abc\"}"
+    evpn_reject "unknown advertise refused"  set-evpn-advertise  "{\"network_id\":\"100\",\"evpn_advertise\":\"sometimes\"}"
+    evpn_reject "remove-evpn needs a target" remove-evpn         "{}"
+    evpn_reject "agent mode refuses native commands" config-evpn-network \
+      "{\"network_id\":\"100\",\"evpn_vni\":\"$L2VNI\"}" "$PHYS,\"ovn_evpn_mode\":\"agent\""
+
+    echo
+    echo "----- teardown -----"
+    evpn_run "remove-evpn (network)" remove-evpn "{\"network_id\":\"100\",\"vpc_id\":\"7\"}"
+    expect_absent "L2 VNI gone from the tier" "dynamic-routing-vni" --bare --columns=other_config list Logical_Switch cs-net-100
+    evpn_run "remove-evpn (vpc)" remove-evpn "{\"vpc_id\":\"7\"}"
+    expect_absent "router EVPN options gone" "dynamic-routing"  --bare --columns=options list Logical_Router cs-vpc-rtr-7
+    expect_absent "EVPN switch gone"         "cs-evpn-"         --bare --columns=name find Logical_Switch "external_ids:cs-evpn-vpc-id=\"7\""
+    expect_match  "the VPC router itself survives" "cs-vpc-rtr-7" lr-list
+
+    echo
+    echo "=========================================================="
+    printf ' EVPN RESULT: %d passed, %d failed\n' "$PASS" "$FAIL"
+    echo "=========================================================="
+    exit $([ "$FAIL" -eq 0 ] && echo 0 || echo 1)
+fi
+
+# ---------------------------------------------------------------------------
 # --payloads <dir>: replay payloads captured from NetworkExtensionElement.
 #
 # The unit tests on the CloudStack side assert what the Java element writes; the
