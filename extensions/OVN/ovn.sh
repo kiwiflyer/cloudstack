@@ -884,8 +884,14 @@ cmd_ensure_network_device() {
     # OVN is a distributed fabric: there is no per-network host to select.
     # We use this hook as a Northbound reachability probe and to hand CloudStack
     # a stable details blob that is echoed back on every later call.
-    local network_id nb_schema
-    require_arg network_id network_id
+    local network_id vpc_id nb_schema current l2vni l3vni
+    # The VPC path calls this with vpc_id and no network_id, so requiring
+    # network_id outright made it fail for every extension-backed VPC and the
+    # details blob was never written.
+    network_id="$(arg network_id)"
+    vpc_id="$(arg vpc_id)"
+    [ -n "${network_id}" ] || [ -n "${vpc_id}" ] \
+        || emit_failure "ensure-network-device needs network_id or vpc_id"
 
     if ! nb_schema="$(nbctl --bare get NB_Global . external_ids 2>/dev/null)"; then
         # get on an empty table can legitimately fail; fall back to a plain list
@@ -895,8 +901,31 @@ cmd_ensure_network_device() {
     fi
 
     log "northbound ${NB_DB} reachable (NB_Global external_ids=${nb_schema:-none})"
-    emit_json "$(jq -nc --arg db "${NB_DB}" --arg ls "$(ls_name "${network_id}")" \
-        '{nb_db:$db, logical_switch:$ls, status:"success"}')"
+
+    # Whatever this prints becomes the stored details blob, so anything already
+    # in it has to be carried forward or it is lost.
+    current="$(arg current_details)"
+    l2vni="$(stored_detail "${current}" evpn_l2_vni)"
+    l3vni="$(stored_detail "${current}" evpn_l3_vni)"
+
+    if evpn_native; then
+        if [ -n "${network_id}" ] && [ -z "${l2vni}" ]; then
+            l2vni="$(evpn_derive_vni "${EVPN_L2_RANGE}" "${network_id}" "ovn_evpn_l2_vni_range")" || l2vni=""
+            [ -n "${l2vni}" ] && log "evpn: allocated L2 vni ${l2vni} to network ${network_id}"
+        fi
+        if [ -n "${vpc_id}" ] && [ -z "${l3vni}" ]; then
+            l3vni="$(evpn_derive_vni "${EVPN_L3_RANGE}" "${vpc_id}" "ovn_evpn_l3_vni_range")" || l3vni=""
+            [ -n "${l3vni}" ] && log "evpn: allocated L3 vni ${l3vni} to vpc ${vpc_id}"
+        fi
+    fi
+
+    emit_json "$(jq -nc --arg db "${NB_DB}" \
+        --arg ls "${network_id:+$(ls_name "${network_id}")}" \
+        --arg l2 "${l2vni}" --arg l3 "${l3vni}" \
+        '{nb_db:$db, status:"success"}
+         + (if $ls != "" then {logical_switch:$ls} else {} end)
+         + (if $l2 != "" then {evpn_l2_vni:$l2} else {} end)
+         + (if $l3 != "" then {evpn_l3_vni:$l3} else {} end)')"
     exit 0
 }
 
@@ -1795,6 +1824,50 @@ EVPN_VXLAN_DEV="$(phys ovn_evpn_vxlan_dev)"
 
 evpn_native() { [ "${EVPN_MODE}" = "native" ]; }
 
+# ---------------------------------------------------------------------------
+# VNI allocation
+#
+# CloudStack has no EVPN VNI allocator, and this extension does not need one in
+# core: the framework persists whatever ensure-network-device prints, per
+# network in network_details and per VPC in vpc_details, and hands it back as
+# network-extension-details on every later call. So the allocation record is
+# that blob, and CloudStack already owns its lifetime.
+#
+# Allocation itself is derived, not searched: VNI = range start + the object's
+# id. That is unique by construction for a given range, so two networks coming
+# up at once cannot be handed the same VNI -- no scan, no lock, no race, which
+# matters because this script has no way to make a scan atomic across several
+# management servers.
+#
+# Once a VNI is in the stored details it wins over any derivation, so widening
+# or moving a range later never renumbers a network that is already up.
+# ---------------------------------------------------------------------------
+
+EVPN_L2_RANGE="$(phys ovn_evpn_l2_vni_range)"
+EVPN_L3_RANGE="$(phys ovn_evpn_l3_vni_range)"
+
+# evpn_derive_vni <range> <scope-id> <what>  -- echoes the VNI, or fails loudly
+evpn_derive_vni() {
+    local range="$1" scope="$2" what="$3" lo hi vni
+    [ -n "${range}" ] || { log "evpn: no ${what} configured; not allocating"; return 1; }
+    case "${range}" in
+        *-*) lo="${range%%-*}"; hi="${range##*-}" ;;
+        *)   log "evpn: ${what} '${range}' is not a range (expected min-max)"; return 1 ;;
+    esac
+    case "${lo}${hi}${scope}" in *[!0-9]*|'') log "evpn: ${what} '${range}' is not numeric"; return 1 ;; esac
+    vni=$(( lo + scope ))
+    if [ "${vni}" -gt "${hi}" ] || [ "${vni}" -gt 16777215 ] || [ "${vni}" -lt 1 ]; then
+        log "evpn: derived VNI ${vni} falls outside ${what} ${range}; widen the range"
+        return 1
+    fi
+    printf '%s' "${vni}"
+}
+
+# A value already recorded in the details blob is authoritative and immutable.
+stored_detail() {
+    printf '%s' "${1:-}" | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null
+}
+
 # VNI 0 is never used, and a VNI is 24 bits.
 evpn_valid_vni() {
     case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
@@ -1877,8 +1950,13 @@ evpn_prune_vpc_switches() {
 cmd_config_evpn_network() {
     local network_id vni redistribute ls
     require_arg network_id network_id
-    require_arg vni evpn_vni
     evpn_require_native
+    # An explicit payload value is an admin pinning the VNI; otherwise use the
+    # one allocated at ensure-network-device time and stored by CloudStack.
+    vni="$(arg evpn_vni)"
+    [ -n "${vni}" ] || vni="$(netd evpn_l2_vni)"
+    [ -n "${vni}" ] || emit_failure \
+        "no L2 VNI for network ${network_id}: pass evpn_vni, or set ovn_evpn_l2_vni_range so one is allocated"
     evpn_valid_vni "${vni}" \
         || emit_failure "evpn_vni '${vni}' is not a VNI: 1-16777215, and 0 is never used"
 
@@ -1941,8 +2019,11 @@ cmd_set_evpn_advertise() {
 cmd_config_evpn_vpc() {
     local vpc_id vni lr ls lrp lsp mac redistribute pub_lrp
     require_arg vpc_id vpc_id
-    require_arg vni evpn_l3_vni
     evpn_require_native
+    vni="$(arg evpn_l3_vni)"
+    [ -n "${vni}" ] || vni="$(netd evpn_l3_vni)"
+    [ -n "${vni}" ] || emit_failure \
+        "no L3 VNI for vpc ${vpc_id}: pass evpn_l3_vni, or set ovn_evpn_l3_vni_range so one is allocated"
     evpn_valid_vni "${vni}" \
         || emit_failure "evpn_l3_vni '${vni}' is not a VNI: 1-16777215, and 0 is never used"
 

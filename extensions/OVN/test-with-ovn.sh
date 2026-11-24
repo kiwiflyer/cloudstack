@@ -232,6 +232,59 @@ if [ "${1:-}" = "--evpn" ]; then
     expect_absent "stale anchor port pruned" "cs-lrp-evpn-$L3VNI" --bare --columns=name find Logical_Router_Port "name=cs-lrp-evpn-$L3VNI"
 
     echo
+    echo "----- VNI allocation -----"
+    # CloudStack persists whatever ensure-network-device prints and feeds it
+    # back as network-extension-details, so that blob is the allocation record
+    # and no core CloudStack table is needed. Allocation is derived from the
+    # range rather than searched, so concurrent networks cannot collide.
+    ALLOC_PHYS="$PHYS,\"ovn_evpn_mode\":\"native\",\"ovn_evpn_l2_vni_range\":\"100000-100999\",\"ovn_evpn_l3_vni_range\":\"200000-200999\""
+    alloc() {  # alloc <phys> <payload> -> prints the command's JSON
+        printf '{"physical-network-extension-details":{%s},"network-extension-details":{},"payload":%s}' \
+            "$1" "$2" > /tmp/alloc.json
+        $SCRIPT ensure-network-device /tmp/alloc.json 20
+    }
+    STEP=$((STEP+1)); printf '\n[%02d] %s\n' "$STEP" "ensure-network-device allocates and records VNIs"
+
+    OUT="$(alloc "$ALLOC_PHYS" '{"network_id":"42","current_details":"{}"}')"
+    printf '      -> %s\n' "$OUT"
+    [ "$(printf '%s' "$OUT" | jq -r '.evpn_l2_vni')" = "100042" ] \
+        && ok "L2 VNI derived from the range start plus the network id" \
+        || bad "expected L2 VNI 100042, got $(printf '%s' "$OUT" | jq -r '.evpn_l2_vni')"
+
+    # The VPC path sends vpc_id and no network_id. Requiring network_id made
+    # this fail for every extension-backed VPC, so the details blob was never
+    # written and an L3 VNI could never be recorded.
+    OUT="$(alloc "$ALLOC_PHYS" '{"vpc_id":"7","current_details":"{}"}')"
+    printf '      -> %s\n' "$OUT"
+    [ "$(printf '%s' "$OUT" | jq -r '.status')" = "success" ] \
+        && ok "the VPC path reaches ensure-network-device at all" \
+        || bad "the VPC path still fails: $OUT"
+    [ "$(printf '%s' "$OUT" | jq -r '.evpn_l3_vni')" = "200007" ] \
+        && ok "L3 VNI derived for the VPC" \
+        || bad "expected L3 VNI 200007, got $(printf '%s' "$OUT" | jq -r '.evpn_l3_vni')"
+
+    # A VNI already recorded outlives any later change to the range, or a
+    # network that is up would be renumbered under itself.
+    OUT="$(alloc "$PHYS,\"ovn_evpn_mode\":\"native\",\"ovn_evpn_l2_vni_range\":\"900000-901000\"" \
+           '{"network_id":"42","current_details":"{\"evpn_l2_vni\":\"100042\"}"}')"
+    [ "$(printf '%s' "$OUT" | jq -r '.evpn_l2_vni')" = "100042" ] \
+        && ok "a recorded VNI survives the range moving under it" \
+        || bad "a recorded VNI was renumbered: $OUT"
+
+    OUT="$(alloc "$PHYS,\"ovn_evpn_mode\":\"native\",\"ovn_evpn_l2_vni_range\":\"100000-100010\"" \
+           '{"network_id":"500","current_details":"{}"}')"
+    [ "$(printf '%s' "$OUT" | jq -r '.evpn_l2_vni // empty')" = "" ] \
+        && ok "an id past the end of the range yields no VNI" \
+        || bad "allocated outside the range: $OUT"
+    [ "$(printf '%s' "$OUT" | jq -r '.status')" = "success" ] \
+        && ok "and does not fail the operation" || bad "running out of range failed the call"
+
+    OUT="$(alloc "$PHYS,\"ovn_evpn_mode\":\"agent\",\"ovn_evpn_l2_vni_range\":\"100000-100999\"" \
+           '{"network_id":"42","current_details":"{}"}')"
+    [ "$(printf '%s' "$OUT" | jq -r '.evpn_l2_vni // empty')" = "" ] \
+        && ok "agent mode allocates nothing" || bad "agent mode allocated a VNI: $OUT"
+
+    echo
     echo "----- distributed static NAT (what the nat token needs) -----"
     # The nat redistribute token advertises DISTRIBUTED dnat_and_snat entries
     # only. CloudStack static NAT is centralized by default and stays that way,

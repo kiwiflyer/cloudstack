@@ -278,6 +278,8 @@ cmk update networkserviceprovider id=<nsp-uuid> state=Enabled
 | `ovn_port_security` | no | `true` | Set `port_security` on each LSP |
 | `ovn_pf_max_ports` | no | `128` | Max VIPs one port-forward rule may expand into |
 | `ovn_distributed_nat` | no | `false` | Process static NAT on the workload's own chassis. **Requires the provider bridge mapping on every chassis** — see §8a |
+| `ovn_evpn_l2_vni_range` | for native EVPN | — | L2 VNI range, `min-max`. A network's VNI is `min + network id` |
+| `ovn_evpn_l3_vni_range` | for native EVPN | — | L3 VNI range, `min-max`. A VPC's VNI is `min + vpc id` |
 | `ovn_private_physnet` | no | `ovn_public_physnet` | Provider name for VPC private gateways |
 | `ovn_evpn_enabled` | no | `false` | Tag switches for `ovn-bgp-agent` |
 | `ovn_evpn_type` | no | `l3` | `l3` (route the subnet into a VRF) or `l2` (stretch the segment) |
@@ -477,10 +479,32 @@ prunes the switch and anchor port the previous VNI left behind.
 
 **What this does not include.** The per-host EVPN reconciler — which creates the
 per-VNI VLANs, SVIs and dummy devices and writes FRR's per-VRF stanzas — is a
-separate component and is not in this PR. Neither is the CloudStack-side VNI
-allocation (zone ranges, `evpnvni` on `createNetwork`/`createVPC`, offering
-capabilities). Without the reconciler the northbound state is correct and `northd`
-accepts it, but nothing advertises yet.
+separate component and is not in this PR. Without it the northbound state is
+correct and `northd` accepts it, but nothing advertises yet.
+
+**VNI allocation needs no CloudStack change.** The extension framework already
+persists whatever `ensure-network-device` prints — per network in
+`network_details`, per VPC in `vpc_details` — and hands it back as
+`network-extension-details` on every later call. That blob is the allocation
+record, and CloudStack already owns its lifetime, so no core table is needed.
+
+Set `ovn_evpn_l2_vni_range` and `ovn_evpn_l3_vni_range` and a VNI is **derived**,
+not searched: range start plus the object's id. That is unique by construction,
+so two networks coming up at once cannot be handed the same VNI — which matters
+because this script cannot make a search atomic across several management
+servers, the same limitation described under concurrency below. The cost is that
+a range must be at least as wide as the highest id you expect; a derivation past
+the end allocates nothing and says so in the log rather than wrapping into
+somebody else's range.
+
+A VNI already in the stored details always wins, so widening or moving a range
+later never renumbers a network that is already up. An explicit `evpn_vni` in the
+payload overrides both, which is how an admin pins one.
+
+What has no extension-side equivalent is only ergonomics: an `evpnvni` parameter
+on `createNetwork`/`createVPC`, a typed field in `listNetworks`, and
+`EvpnL2`/`EvpnL3` offering capabilities. Those need core changes; nothing
+functional does.
 
 **Device naming.** Linux caps an interface name at 15 characters and `ovn-northd`
 drops longer ones, so the names are built to fit the widest legal VNI:
@@ -748,10 +772,12 @@ real hosts.
 ./test-with-ovn.sh --evpn      # needs OVN 26.09 or later; exits early otherwise
 ```
 
-52 assertions against a real 26.09 northbound database: the L2 VNI and all three
+59 assertions against a real 26.09 northbound database: the L2 VNI and all three
 interface names on a tier switch, all three `evpnadvertise` values, the VPC's VRF
 and Type-5 anchor with its gateway chassis, `gateway_port` pinned on the NAT rows,
-stale-VNI pruning, both static NAT paths (centralized by default, distributed
+stale-VNI pruning, VNI allocation (derivation, the VPC path, immutability
+under a moved range, running past the end, and agent mode allocating nothing),
+both static NAT paths (centralized by default, distributed
 under `ovn_distributed_nat`, and the fallback when the address is on no port),
 six guards (VNI 0, over 24 bits, non-numeric, unknown advertise value, no target,
 and native commands refused in agent mode), and teardown that leaves the VPC
